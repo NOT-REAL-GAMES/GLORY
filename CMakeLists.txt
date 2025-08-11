@@ -33,6 +33,45 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(glm)
 
+FetchContent_Declare(
+    spirv-cross STATIC
+    GIT_REPOSITORY "https://github.com/KhronosGroup/SPIRV-Cross.git"
+    GIT_TAG "main"
+)
+
+FetchContent_MakeAvailable(spirv-cross)
+
+FetchContent_Declare(
+    SPIRV-Headers STATIC
+    GIT_REPOSITORY "https://github.com/KhronosGroup/SPIRV-Headers.git"
+    GIT_TAG "main"
+)
+
+FetchContent_MakeAvailable(SPIRV-Headers)
+
+FetchContent_Declare(
+    SPIRV-Tools STATIC
+    GIT_REPOSITORY "https://github.com/KhronosGroup/SPIRV-Tools.git"
+    GIT_TAG "main"
+)
+
+FetchContent_MakeAvailable(SPIRV-Tools)
+
+FetchContent_Declare(
+    volk STATIC
+    GIT_REPOSITORY "https://github.com/zeux/volk.git"
+)
+
+FetchContent_MakeAvailable(volk)
+
+FetchContent_Declare(
+    glslang STATIC
+    GIT_REPOSITORY "https://github.com/KhronosGroup/glslang.git"
+    GIT_TAG "main"
+
+)
+
+FetchContent_MakeAvailable(glslang)
 
 FetchContent_Declare(
     flecs STATIC
@@ -54,7 +93,18 @@ add_executable(GLORY
     main.cpp
 )
 
-target_link_libraries(GLORY PUBLIC SDL3::SDL3 Vulkan::Vulkan Jolt::Jolt VulkanMemoryAllocator flecs glm::glm)
+target_link_libraries(GLORY PUBLIC 
+    SDL3::SDL3 
+    Vulkan::Vulkan 
+    Jolt::Jolt 
+    VulkanMemoryAllocator 
+    flecs 
+    glm::glm 
+    volk::volk
+    glslang::glslang
+    SPIRV-Tools
+    SPIRV-Headers
+    )
 
 
 if(WIN32)
@@ -62,8 +112,8 @@ if(WIN32)
         TARGET GLORY
         POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy
-                $<TARGET_RUNTIME_DLLS:GRIFT>
-                $<TARGET_FILE_DIR:GRIFT>
+                $<TARGET_RUNTIME_DLLS:GLORY>
+                $<TARGET_FILE_DIR:GLORY>
         COMMAND_EXPAND_LISTS
     )
 endif()
