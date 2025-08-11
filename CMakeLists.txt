@@ -26,6 +26,13 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(SDL3)
 
+FetchContent_Declare(
+    glm STATIC
+    GIT_REPOSITORY "https://github.com/g-truc/glm.git"
+)
+
+FetchContent_MakeAvailable(glm)
+
 
 FetchContent_Declare(
     flecs STATIC
@@ -47,7 +54,7 @@ add_executable(GLORY
     main.cpp
 )
 
-target_link_libraries(GLORY PUBLIC SDL3::SDL3 Vulkan::Vulkan Jolt::Jolt VulkanMemoryAllocator flecs)
+target_link_libraries(GLORY PUBLIC SDL3::SDL3 Vulkan::Vulkan Jolt::Jolt VulkanMemoryAllocator flecs glm::glm)
 
 
 if(WIN32)
