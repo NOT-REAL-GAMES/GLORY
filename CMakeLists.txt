@@ -89,6 +89,14 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(VulkanMemoryAllocator)
 
+FetchContent_Declare(
+    tinyexr STATIC
+    GIT_REPOSITORY "https://github.com/syoyo/tinyexr.git"
+    GIT_TAG "v1.0.12"  # Try latest version
+)
+
+FetchContent_MakeAvailable(tinyexr)
+
 add_executable(GLORY
     main.cpp
 )
@@ -104,6 +112,7 @@ target_link_libraries(GLORY PUBLIC
     glslang::glslang
     SPIRV-Tools
     SPIRV-Headers
+    tinyexr
     )
 
 
