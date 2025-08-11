@@ -1,0 +1,14 @@
+# Target labels
+ sdl3-populate
+# Source files and their labels
+/Users/rb/Projects/GLORY/build/_deps/sdl3-subbuild/CMakeFiles/sdl3-populate
+/Users/rb/Projects/GLORY/build/_deps/sdl3-subbuild/CMakeFiles/sdl3-populate.rule
+/Users/rb/Projects/GLORY/build/_deps/sdl3-subbuild/CMakeFiles/sdl3-populate-complete.rule
+/Users/rb/Projects/GLORY/build/_deps/sdl3-subbuild/sdl3-populate-prefix/src/sdl3-populate-stamp/sdl3-populate-build.rule
+/Users/rb/Projects/GLORY/build/_deps/sdl3-subbuild/sdl3-populate-prefix/src/sdl3-populate-stamp/sdl3-populate-configure.rule
+/Users/rb/Projects/GLORY/build/_deps/sdl3-subbuild/sdl3-populate-prefix/src/sdl3-populate-stamp/sdl3-populate-download.rule
+/Users/rb/Projects/GLORY/build/_deps/sdl3-subbuild/sdl3-populate-prefix/src/sdl3-populate-stamp/sdl3-populate-install.rule
+/Users/rb/Projects/GLORY/build/_deps/sdl3-subbuild/sdl3-populate-prefix/src/sdl3-populate-stamp/sdl3-populate-mkdir.rule
+/Users/rb/Projects/GLORY/build/_deps/sdl3-subbuild/sdl3-populate-prefix/src/sdl3-populate-stamp/sdl3-populate-patch.rule
+/Users/rb/Projects/GLORY/build/_deps/sdl3-subbuild/sdl3-populate-prefix/src/sdl3-populate-stamp/sdl3-populate-test.rule
+/Users/rb/Projects/GLORY/build/_deps/sdl3-subbuild/sdl3-populate-prefix/src/sdl3-populate-stamp/sdl3-populate-update.rule

@@ -1,0 +1,14 @@
+{
+	"backtraceGraph" : 
+	{
+		"commands" : [],
+		"files" : [],
+		"nodes" : []
+	},
+	"installers" : [],
+	"paths" : 
+	{
+		"build" : "_deps/vulkanmemoryallocator-build",
+		"source" : "build/_deps/vulkanmemoryallocator-src"
+	}
+}
