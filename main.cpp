@@ -3,10 +3,9 @@
 
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
-#include <volk/volk.h>
 
-// VMA implementation - this must be included in exactly one source file
-#define VMA_IMPLEMENTATION
+#include <volk.h>
+
 #include <vk_mem_alloc.h>
 
 #include <glm/glm.hpp>
@@ -390,10 +389,13 @@ private:
     }
     
     bool initVulkan() {
-        if (volkInitialize() != VK_SUCCESS) {
-            std::cerr << "Failed to initialize volk\n";
+        if (!SDL_Vulkan_LoadLibrary(nullptr)) {
+            std::cerr << "Failed to load Vulkan library: " << SDL_GetError() << std::endl;
             return false;
         }
+                
+        // Initialize Volk with SDL's function pointer
+        volkInitializeCustom((PFN_vkGetInstanceProcAddr)SDL_Vulkan_GetVkGetInstanceProcAddr());
         
         // Create Vulkan instance
         VkApplicationInfo appInfo{};

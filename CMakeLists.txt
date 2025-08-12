@@ -16,7 +16,7 @@ endif()
 
 set(CMAKE_POLICY_DEFAULT_CMP0091 NEW)
 
-find_package(Vulkan COMPONENTS volk REQUIRED)
+find_package(Vulkan REQUIRED)
 
 include(FetchContent)
 FetchContent_Declare(
@@ -108,6 +108,7 @@ FetchContent_MakeAvailable(tinyexr)
 
 add_executable(GLORY
     main.cpp
+    vma_impl.cpp
 )
 
 target_link_libraries(GLORY PUBLIC 
@@ -124,6 +125,9 @@ target_link_libraries(GLORY PUBLIC
     tinyexr
     )
 
+if(MSVC)
+    target_link_options(GLORY PRIVATE "/STACK:8388608")  # 8MB stack instead of default 1MB
+endif()
 
 if(WIN32)
    set(VULKAN_DLL_SOURCE_PATH "C:\\Windows\\System32\\vulkan-1.dll")
