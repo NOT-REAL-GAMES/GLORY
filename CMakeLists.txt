@@ -2,10 +2,19 @@ cmake_minimum_required(VERSION 3.16)
 project(GLORY)
 
 set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+# Force these settings for all targets
+set(CMAKE_CXX_STANDARD 23 CACHE STRING "C++ standard" FORCE)
+set(CMAKE_CXX_STANDARD_REQUIRED ON CACHE BOOL "Require C++ standard" FORCE)
 
 if (MSVC)
-    add_compile_options(/LTCG /MDd) 
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+    add_compile_options(/std:c++latest)
 endif()
+
+set(CMAKE_POLICY_DEFAULT_CMP0091 NEW)
 
 find_package(Vulkan COMPONENTS volk REQUIRED)
 
@@ -104,7 +113,7 @@ add_executable(GLORY
 target_link_libraries(GLORY PUBLIC 
     SDL3::SDL3 
     Vulkan::Vulkan 
-    Vulkan::volk
+    volk::volk
     Jolt::Jolt 
     VulkanMemoryAllocator 
     flecs 
@@ -117,6 +126,18 @@ target_link_libraries(GLORY PUBLIC
 
 
 if(WIN32)
+   set(VULKAN_DLL_SOURCE_PATH "C:\\Windows\\System32\\vulkan-1.dll")
+
+    add_custom_command(
+        TARGET GLORY # Replace with the name of your executable
+        POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy
+                "${VULKAN_DLL_SOURCE_PATH}"
+                "$<TARGET_FILE_DIR:GLORY>" # Copies to the directory of your executable
+        COMMENT "Copying vulkan-1.dll to build directory"
+    )
+
+
     add_custom_command(
         TARGET GLORY
         POST_BUILD
