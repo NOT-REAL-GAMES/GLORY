@@ -404,6 +404,17 @@ private:
         uint32_t extensionCount = 0;
         auto extensions = SDL_Vulkan_GetInstanceExtensions(&extensionCount);
         
+        std::vector<const char*> requiredExtensions;
+        for (uint32_t i = 0; i < extensionCount; i++) {
+            requiredExtensions.push_back(extensions[i]);
+        }
+
+        #ifdef __APPLE__
+        // Add MoltenVK-specific extensions
+        requiredExtensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+        requiredExtensions.push_back("VK_KHR_get_physical_device_properties2");
+        #endif
+
         auto createInfo = vk::InstanceCreateInfo();
 
         createInfo.pApplicationInfo = &appInfo;
@@ -411,6 +422,11 @@ private:
         createInfo.enabledExtensionCount = extensionCount;
         createInfo.ppEnabledExtensionNames = extensions;
         
+        #ifdef __APPLE__
+        // Enable portability enumeration for MoltenVK
+        createInfo.flags |= vk::InstanceCreateFlagBits::eEnumeratePortabilityKHR;
+        #endif
+
         instance = vk::createInstance(createInfo).value;
         
         VULKAN_HPP_DEFAULT_DISPATCHER.init(instance);
