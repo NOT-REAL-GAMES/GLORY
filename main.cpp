@@ -6,6 +6,7 @@
 
 #include <volk.h>
 
+#define VMA_IMPLEMENTATION
 #include <vk_mem_alloc.h>
 
 #include <glm/glm.hpp>
@@ -395,8 +396,10 @@ private:
         }
                 
         // Initialize Volk with SDL's function pointer
-        volkInitializeCustom((PFN_vkGetInstanceProcAddr)SDL_Vulkan_GetVkGetInstanceProcAddr());
+        //volkInitializeCustom((PFN_vkGetInstanceProcAddr)SDL_Vulkan_GetVkGetInstanceProcAddr());
         
+        volkInitialize();
+
         // Create Vulkan instance
         VkApplicationInfo appInfo{};
         appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
