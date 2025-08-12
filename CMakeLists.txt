@@ -12,6 +12,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON CACHE BOOL "Require C++ standard" FORCE)
 if (MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
     add_compile_options(/std:c++latest)
+    add_compile_definitions(VK_USE_PLATFORM_WIN32_KHR)
 endif()
 
 set(CMAKE_POLICY_DEFAULT_CMP0091 NEW)
@@ -106,6 +107,8 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(tinyexr)
 
+
+
 add_executable(GLORY
     main.cpp
     vma_impl.cpp
@@ -127,6 +130,7 @@ target_link_libraries(GLORY PUBLIC
 
 if(MSVC)
     target_link_options(GLORY PRIVATE "/STACK:8388608")  # 8MB stack instead of default 1MB
+    target_compile_options(GLORY PRIVATE /Zp8)  # Force 8-byte alignment
 endif()
 
 if(WIN32)

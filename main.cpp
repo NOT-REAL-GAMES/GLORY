@@ -12,6 +12,9 @@
 VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 
 #define VMA_IMPLEMENTATION
+#define VMA_STATIC_VULKAN_FUNCTIONS 0  // Force dynamic loading
+#define VMA_DYNAMIC_VULKAN_FUNCTIONS 1
+
 #include <vk_mem_alloc.h>
 
 #include <glm/glm.hpp>
@@ -25,6 +28,8 @@ VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 #include <array>
 #include <fstream>
 #include <chrono>
+
+vk::detail::DispatchLoaderDynamic dl;
 
 // Vertex structure for PBR rendering
 struct Vertex {
@@ -374,15 +379,17 @@ private:
     }
     
     bool initVulkan() {
+        try {
+
         if (!SDL_Vulkan_LoadLibrary(nullptr)) {
             std::cerr << "Failed to load Vulkan library: " << SDL_GetError() << std::endl;
             return false;
         }
-                
-        volkInitialize();
+                        
+
+        dl.init();
         
-        // Initialize the dispatch loader
-        VULKAN_HPP_DEFAULT_DISPATCHER.init(vkGetInstanceProcAddr);
+        VULKAN_HPP_DEFAULT_DISPATCHER.init(dl.vkGetInstanceProcAddr);
 
         // Create Vulkan instance
         auto appInfo = vk::ApplicationInfo(
@@ -406,10 +413,10 @@ private:
         
         instance = vk::createInstance(createInfo).value;
         
-        volkLoadInstance(instance);
-        
-        // Load instance-level functions into dispatch loader
         VULKAN_HPP_DEFAULT_DISPATCHER.init(instance);
+
+        // Load instance-level functions into dispatch loader
+        dl.init(instance);
         
         // Create surface
         VkSurfaceKHR s;
@@ -427,6 +434,10 @@ private:
         }
         
         return true;
+        } catch (const std::exception& e) {
+        std::cerr << "Error: " << e.what() << std::endl;
+        return -1;
+    }
     }
     
     bool pickPhysicalDevice() {
@@ -513,7 +524,6 @@ private:
             return false;
         }
         
-        volkLoadDevice(device);
         graphicsQueue = device.getQueue(graphicsFamily, 0);
         
         return true;
@@ -521,11 +531,11 @@ private:
     
     bool createVMA() {
         VmaVulkanFunctions vulkanFunctions = {};
-        vulkanFunctions.vkGetInstanceProcAddr = vkGetInstanceProcAddr;
-        vulkanFunctions.vkGetDeviceProcAddr = vkGetDeviceProcAddr;
+        vulkanFunctions.vkGetInstanceProcAddr = dl.vkGetInstanceProcAddr;
+        vulkanFunctions.vkGetDeviceProcAddr = dl.vkGetDeviceProcAddr;
         
         VmaAllocatorCreateInfo allocatorInfo{};
-        allocatorInfo.vulkanApiVersion = VK_API_VERSION_1_0;
+        allocatorInfo.vulkanApiVersion = VK_API_VERSION_1_4;
         allocatorInfo.physicalDevice = physicalDevice;
         allocatorInfo.device = device;
         allocatorInfo.instance = instance;
@@ -1480,5 +1490,7 @@ int main() {
     }
     
     renderer.cleanup();
+
+    
     return 0;
 }
