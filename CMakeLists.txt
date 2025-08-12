@@ -7,7 +7,7 @@ if (MSVC)
     add_compile_options(/LTCG /MDd) 
 endif()
 
-find_package(Vulkan REQUIRED)
+find_package(Vulkan COMPONENTS volk REQUIRED)
 
 include(FetchContent)
 FetchContent_Declare(
@@ -104,11 +104,11 @@ add_executable(GLORY
 target_link_libraries(GLORY PUBLIC 
     SDL3::SDL3 
     Vulkan::Vulkan 
+    Vulkan::volk
     Jolt::Jolt 
     VulkanMemoryAllocator 
     flecs 
     glm::glm 
-    volk::volk
     glslang::glslang
     SPIRV-Tools
     SPIRV-Headers
