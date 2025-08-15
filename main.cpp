@@ -252,7 +252,7 @@ float DistributionGGX(vec3 N, vec3 H, float roughness) {
 
 float GeometrySchlickGGX(float NdotV, float roughness) {
     float r = (roughness + 1.0);
-    float k = (r * r * r);
+    float k = (r * r)/8.0;
     
     float num = NdotV;
     float denom = NdotV * (1.0 - k) + k;
@@ -277,12 +277,14 @@ void main() {
     vec3 N = normalize(fragNormal);
     vec3 V = normalize(fragPos - fragViewPos);
     
-    vec3 F0 = vec3(0.5);
+    vec3 F0 = vec3(0.04);
     F0 = mix(F0, material.albedo, material.metallic);
     
+    vec3 ambient = vec3(0.0);
+
     vec3 Lo = vec3(0.0);
     for(int i = 0; i < 4; ++i) {
-        vec3 L = -normalize(fragPos - lights.lightPositions[i]);
+        vec3 L = normalize(lights.lightPositions[i] - fragPos);
         vec3 H = normalize((V + L));
         float distance = -length( fragPos - lights.lightPositions[i]);
         float attenuation = 1.0 / (distance * distance);
@@ -294,6 +296,7 @@ void main() {
         float NdotV = max(dot(N, V), 0.0);
         float NdotL = max(dot(N, L), 0.0);
         float VdotH = max(dot(V, H), 0.0);
+        float VdotL = max(dot(V, L), 0.0);
         float NdotH = max(dot(N, H), 0.0);
 
         float wrap = 0.001;
@@ -314,10 +317,9 @@ void main() {
 
             
             vec3 numerator = NDF * G * F;
-            float denominator = 2.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.1;
+            float denominator = 4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.001;
             specular = numerator / denominator;
         }
-
 
         vec3 diffuse = kD * material.albedo / PI * NdotL;
 
@@ -325,15 +327,29 @@ void main() {
             float softNdotL = smoothstep(-material.roughness, 1.0, NdotL);
             // Standard BRDF for smooth surfaces
             Lo += (diffuse * radiance) + (specular * radiance * softNdotL);
+            
+            float viewRim = 1.0 - max(6.0 * softNdotL * NdotH * NdotV / -VdotH*8.0, 0.0);
+            viewRim = pow(viewRim, 2.5); // Tighten the rim
+
+            // Modulate rim by light contribution
+            float lightInfluence = smoothstep(-0.01, viewRim, softNdotL); // How much this light affects the rim
+            float rim = viewRim * lightInfluence;
+
+            // Make rim stronger on smooth surfaces
+            rim *= (1.0 - material.roughness * 0.5);
+
+            vec3 rimColor = lights.lightColors[i] * rim * 0.02; // Use actual light color
+            Lo += rimColor * radiance;
+
 
     }
     
-    vec3 ambient = vec3(0.003) * material.albedo * material.ao;
+    ambient += vec3(0.003) * material.albedo * material.ao;
     vec3 color = ambient + Lo;
     
     // HDR tonemapping
     color = agx(color);
-    color = agxEotf(color);
+    color = pow(agxEotf(color),vec3(2.0));
 
     // Gamma correction
     color = pow(color, vec3(1.0/2.2));
@@ -1448,9 +1464,9 @@ private:
         
         // Update camera
         CameraUBO cameraUbo{};
-        cameraUbo.view = glm::lookAt(glm::vec3(/*sinf(time)*4.0f, 0.0f, cosf(time)*4.0f*/0.0f,0.0f,-5.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+        cameraUbo.view = glm::lookAt(glm::vec3(/*sinf(time)*4.0f, 0.0f, cosf(time)*4.0f*/0.0f,-0.0f,-5.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
         cameraUbo.invView = glm::inverse(cameraUbo.view);
-        cameraUbo.proj = glm::perspective(glm::radians(45.0f), swapChainExtent.width / (float) swapChainExtent.height, 0.1f, 10.0f);
+        cameraUbo.proj = glm::perspective(glm::radians(45.0f), swapChainExtent.width / (float) swapChainExtent.height, 0.1f, 1000.0f);
         cameraUbo.proj[1][1] *= -1; // Flip Y for Vulkan
         cameraUbo.viewPos = cameraUbo.view[3];
         
@@ -1461,15 +1477,15 @@ private:
         
         // Update lights
         LightUBO lightUbo{};
-        lightUbo.lightPositions[0] = glm::vec4(sinf(1.5708f+time)*5.0f, 0.0f, cosf(1.5708f+time)*5.0f,0.0f);
-        lightUbo.lightPositions[1] = glm::vec4(sinf(3.1416f+time)*5.0f, -5.0f, cosf(3.1416f+time)*5.0f, 0.0f);
-        lightUbo.lightPositions[2] = glm::vec4(sinf(4.7124f+time)*5.0f, 0.0f, cosf(4.7124f+time)*5.0f,0.0f);
-        lightUbo.lightPositions[3] = glm::vec4(sinf(-time)*4.0f, 10.0f, cosf(-time)*4.0f,0.0f);
+        lightUbo.lightPositions[0] = glm::vec4(sinf(time)*5.0f, 0.0f, cosf(time)*5.0f,0.0f);
+        lightUbo.lightPositions[1] = glm::vec4(sinf(2.0944f+time)*5.0f, 0.0f, cosf(2.0944f+time)*5.0f, 0.0f);
+        lightUbo.lightPositions[2] = glm::vec4(sinf(4.1888f+time)*5.0f, 0.0f, cosf(4.1888f+time)*5.0f,0.0f);
+        lightUbo.lightPositions[3] = glm::vec4(sinf(time)*5.0f, -10.0f, cosf(time)*5.0f,0.0f);
         
-        lightUbo.lightColors[0] = glm::vec4(0.0f, 30.0f, 30.0f,0.0f);   // CYAN
-        lightUbo.lightColors[1] = glm::vec4(300.0f, 0.0f, 300.0f,0.0f);   // MAGENTA
-        lightUbo.lightColors[2] = glm::vec4(30.0f, 30.0f, 0.0f,0.0f);   // YELLOW
-        lightUbo.lightColors[3] = glm::vec4(30.0f, 30.0f, 30.0f,0.0f); // WHITE
+        lightUbo.lightColors[0] = glm::vec4(30.0f, 0.0f, 0.0f,0.0f);   // CYAN
+        lightUbo.lightColors[1] = glm::vec4(0.0f, 30.0f, 0.0f,0.0f);   // MAGENTA
+        lightUbo.lightColors[2] = glm::vec4(0.0f, 0.0f, 30.0f,0.0f);   // YELLOW
+        lightUbo.lightColors[3] = glm::vec4(0.0f, 0.0f, 0.0f,0.0f); // WHITE
         
         vmaMapMemory(allocator, lightUniformBufferAllocations[currentImage], &data);
         memcpy(data, &lightUbo, sizeof(lightUbo));
@@ -1478,8 +1494,8 @@ private:
         // Update material
         PBRMaterial material{};
         material.albedo = glm::vec3(1.0f, 1.0f, 1.0f);
-        material.metallic = 0.5f;
-        material.roughness = 0.1f; //+ (sinf(time*8.0f) / 2.0f);
+        material.metallic = 0.0f;
+        material.roughness = 0.5f + (sinf(time/8.0f) / 2.0f);
         material.ao = 0.5f;
         
         vmaMapMemory(allocator, materialUniformBufferAllocations[currentImage], &data);
