@@ -65,13 +65,17 @@ struct CameraUBO {
     alignas(16) glm::mat4 view;
     alignas(16) glm::mat4 proj;
     alignas(16) glm::vec3 viewPos;
+    alignas(16) glm::mat4 invView;
+
 };
+
 
 // Lighting uniform buffer
 struct LightUBO {
-    alignas(16) glm::vec3 lightPositions[4];
-    alignas(16) glm::vec3 lightColors[4];
+    glm::vec4 lightPositions[4];
+    glm::vec4 lightColors[4];
 };
+
 
 class PBRRenderer {
 private:
@@ -134,6 +138,7 @@ layout(binding = 0) uniform CameraUBO {
     mat4 view;
     mat4 proj;
     vec3 viewPos;
+    vec3 invViewPos;
 } camera;
 
 layout(location = 0) in vec3 inPosition;
@@ -145,12 +150,14 @@ layout(location = 0) out vec3 fragPos;
 layout(location = 1) out vec3 fragNormal;
 layout(location = 2) out vec2 fragTexCoord;
 layout(location = 3) out vec3 fragViewPos;
+layout(location = 4) out vec3 fragInvViewPos;
 
 void main() {
     fragPos = inPosition;
     fragNormal = inNormal;
     fragTexCoord = inTexCoord;
     fragViewPos = camera.viewPos;
+    fragInvViewPos = camera.invViewPos;
     
     gl_Position = camera.proj * camera.view * vec4(inPosition, 1.0);
 }
@@ -175,10 +182,60 @@ layout(location = 0) in vec3 fragPos;
 layout(location = 1) in vec3 fragNormal;
 layout(location = 2) in vec2 fragTexCoord;
 layout(location = 3) in vec3 fragViewPos;
+layout(location = 4) in vec3 fragInvViewPos;
 
 layout(location = 0) out vec4 outColor;
 
 const float PI = 3.14159265359;
+
+vec3 agxDefaultContrastApprox(vec3 x) {
+    vec3 x2 = x * x;
+    vec3 x4 = x2 * x2;
+    
+    return + 15.5     * x4 * x2
+           - 40.14    * x4 * x
+           + 31.96    * x4
+           - 6.868    * x2 * x
+           + 0.4298   * x2
+           + 0.1191   * x
+           - 0.00232;
+}
+
+vec3 agx(vec3 val) {
+    const mat3 agx_mat = mat3(
+        0.842479062253094, 0.0784335999999992,  0.0792237451477643,
+        0.0423282422610123, 0.878468636469772,  0.0791661274605434,
+        0.0423756549057051, 0.0784336,          0.879142973793104
+    );
+    
+    const float min_ev = -12.47393;
+    const float max_ev = 4.026069;
+    
+    // Input transform
+    val = agx_mat * val;
+    
+    // Log2 space encoding
+    val = clamp(log2(val), min_ev, max_ev);
+    val = (val - min_ev) / (max_ev - min_ev);
+    
+    // Apply sigmoid function approximation
+    val = agxDefaultContrastApprox(val);
+    
+    return val;
+}
+
+vec3 agxEotf(vec3 val) {
+    const mat3 agx_mat_inv = mat3(
+        1.19687900512017, -0.0980208811401368, -0.0990297440797205,
+        -0.0528968517574562, 1.15190312990417, -0.0989611768448433,
+        -0.0529716355144438, -0.0980434501171241, 1.15107367264116
+    );
+    
+    // Inverse tonemap
+    val = agx_mat_inv * val;
+    
+    return val;
+}
 
 float DistributionGGX(vec3 N, vec3 H, float roughness) {
     float a = roughness * roughness;
@@ -195,7 +252,7 @@ float DistributionGGX(vec3 N, vec3 H, float roughness) {
 
 float GeometrySchlickGGX(float NdotV, float roughness) {
     float r = (roughness + 1.0);
-    float k = (r * r) / 8.0;
+    float k = (r * r * r);
     
     float num = NdotV;
     float denom = NdotV * (1.0 - k) + k;
@@ -213,45 +270,71 @@ float GeometrySmith(vec3 N, vec3 V, vec3 L, float roughness) {
 }
 
 vec3 fresnelSchlick(float cosTheta, vec3 F0) {
-    return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+    return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 1.0);
 }
 
 void main() {
     vec3 N = normalize(fragNormal);
-    vec3 V = normalize(fragViewPos - fragPos);
+    vec3 V = normalize(fragPos - fragViewPos);
     
-    vec3 F0 = vec3(0.04);
+    vec3 F0 = vec3(0.5);
     F0 = mix(F0, material.albedo, material.metallic);
     
     vec3 Lo = vec3(0.0);
     for(int i = 0; i < 4; ++i) {
-        vec3 L = normalize(lights.lightPositions[i] - fragPos);
-        vec3 H = normalize(V + L);
-        float distance = length(lights.lightPositions[i] - fragPos);
+        vec3 L = -normalize(fragPos - lights.lightPositions[i]);
+        vec3 H = normalize((V + L));
+        float distance = -length( fragPos - lights.lightPositions[i]);
         float attenuation = 1.0 / (distance * distance);
         vec3 radiance = lights.lightColors[i] * attenuation;
         
         float NDF = DistributionGGX(N, H, material.roughness);
         float G = GeometrySmith(N, V, L, material.roughness);
-        vec3 F = fresnelSchlick(max(dot(H, V), 0.0), F0);
-        
+
+        float NdotV = max(dot(N, V), 0.0);
+        float NdotL = max(dot(N, L), 0.0);
+        float VdotH = max(dot(V, H), 0.0);
+        float NdotH = max(dot(N, H), 0.0);
+
+        float wrap = 0.001;
+
+        vec3 F = fresnelSchlick(max(dot(H, V), 0.0)*2.0, F0);
+            
         vec3 kS = F;
         vec3 kD = vec3(1.0) - kS;
         kD *= 1.0 - material.metallic;
-        
-        vec3 numerator = NDF * G * F;
-        float denominator = 4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.0001;
-        vec3 specular = numerator / denominator;
-        
-        float NdotL = max(dot(N, L), 0.0);
-        Lo += (kD * material.albedo / PI + specular) * radiance * NdotL;
+
+        vec3 specular = vec3(0.0);
+
+        if (NdotL > 0.0 && NdotV > 0.0) {
+
+
+            //G = min(1.0, min(2.0 * NdotH * NdotV / VdotH, 2.0 * NdotH * NdotL / VdotH));
+
+
+            
+            vec3 numerator = NDF * G * F;
+            float denominator = 2.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.1;
+            specular = numerator / denominator;
+        }
+
+
+        vec3 diffuse = kD * material.albedo / PI * NdotL;
+
+            // For rough surfaces, use a softer falloff
+            float softNdotL = smoothstep(-material.roughness, 1.0, NdotL);
+            // Standard BRDF for smooth surfaces
+            Lo += (diffuse * radiance) + (specular * radiance * softNdotL);
+
     }
     
-    vec3 ambient = vec3(0.03) * material.albedo * material.ao;
+    vec3 ambient = vec3(0.003) * material.albedo * material.ao;
     vec3 color = ambient + Lo;
     
     // HDR tonemapping
-    color = color / (color + vec3(1.0));
+    color = agx(color);
+    color = agxEotf(color);
+
     // Gamma correction
     color = pow(color, vec3(1.0/2.2));
     
@@ -369,7 +452,7 @@ private:
             return false;
         }
         
-        window = SDL_CreateWindow("PBR Vulkan Example", 800, 600, SDL_WINDOW_VULKAN);
+        window = SDL_CreateWindow("PBR Vulkan Example", 1600, 900, SDL_WINDOW_VULKAN);
         if (!window) {
             std::cerr << "Failed to create window\n";
             return false;
@@ -1112,7 +1195,22 @@ private:
                 vertex.texCoord.y = 1.0f - (float)lat / latitudeBands;
                 
                 // Simple tangent calculation
-                vertex.tangent = glm::vec3(-sinPhi, 0, cosPhi);
+                glm::vec3 tangent = glm::vec3(-sinPhi * sinTheta, 0.0f, cosPhi * sinTheta);
+                glm::vec3 bitangent = glm::vec3(cosPhi * cosTheta, -sinTheta, sinPhi * cosTheta);
+
+                // Normalize
+                tangent = glm::normalize(tangent);
+                bitangent = glm::normalize(bitangent);
+
+                // Ensure orthogonality (Gram-Schmidt)
+                tangent = glm::normalize(tangent - glm::dot(tangent, vertex.normal) * vertex.normal);
+
+                // Check handedness and fix if needed
+                if (glm::dot(glm::cross(vertex.normal, tangent), bitangent) < 0.0f) {
+                    tangent = -tangent;
+                }
+
+                vertex.tangent = tangent;
                 
                 vertices.push_back(vertex);
             }
@@ -1350,10 +1448,11 @@ private:
         
         // Update camera
         CameraUBO cameraUbo{};
-        cameraUbo.view = glm::lookAt(glm::vec3(2.0f, 2.0f, 2.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+        cameraUbo.view = glm::lookAt(glm::vec3(/*sinf(time)*4.0f, 0.0f, cosf(time)*4.0f*/0.0f,0.0f,-5.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+        cameraUbo.invView = glm::inverse(cameraUbo.view);
         cameraUbo.proj = glm::perspective(glm::radians(45.0f), swapChainExtent.width / (float) swapChainExtent.height, 0.1f, 10.0f);
         cameraUbo.proj[1][1] *= -1; // Flip Y for Vulkan
-        cameraUbo.viewPos = glm::vec3(2.0f, 2.0f, 2.0f);
+        cameraUbo.viewPos = cameraUbo.view[3];
         
         void* data;
         vmaMapMemory(allocator, cameraUniformBufferAllocations[currentImage], &data);
@@ -1362,15 +1461,15 @@ private:
         
         // Update lights
         LightUBO lightUbo{};
-        lightUbo.lightPositions[0] = glm::vec3(-10.0f, 10.0f, 10.0f);
-        lightUbo.lightPositions[1] = glm::vec3(10.0f, 10.0f, 10.0f);
-        lightUbo.lightPositions[2] = glm::vec3(-10.0f, -10.0f, 10.0f);
-        lightUbo.lightPositions[3] = glm::vec3(10.0f, -10.0f, 10.0f);
+        lightUbo.lightPositions[0] = glm::vec4(sinf(1.5708f+time)*5.0f, 0.0f, cosf(1.5708f+time)*5.0f,0.0f);
+        lightUbo.lightPositions[1] = glm::vec4(sinf(3.1416f+time)*5.0f, -5.0f, cosf(3.1416f+time)*5.0f, 0.0f);
+        lightUbo.lightPositions[2] = glm::vec4(sinf(4.7124f+time)*5.0f, 0.0f, cosf(4.7124f+time)*5.0f,0.0f);
+        lightUbo.lightPositions[3] = glm::vec4(sinf(-time)*4.0f, 10.0f, cosf(-time)*4.0f,0.0f);
         
-        lightUbo.lightColors[0] = glm::vec3(300.0f, 300.0f, 300.0f);
-        lightUbo.lightColors[1] = glm::vec3(300.0f, 300.0f, 300.0f);
-        lightUbo.lightColors[2] = glm::vec3(300.0f, 300.0f, 300.0f);
-        lightUbo.lightColors[3] = glm::vec3(300.0f, 300.0f, 300.0f);
+        lightUbo.lightColors[0] = glm::vec4(0.0f, 30.0f, 30.0f,0.0f);   // CYAN
+        lightUbo.lightColors[1] = glm::vec4(300.0f, 0.0f, 300.0f,0.0f);   // MAGENTA
+        lightUbo.lightColors[2] = glm::vec4(30.0f, 30.0f, 0.0f,0.0f);   // YELLOW
+        lightUbo.lightColors[3] = glm::vec4(30.0f, 30.0f, 30.0f,0.0f); // WHITE
         
         vmaMapMemory(allocator, lightUniformBufferAllocations[currentImage], &data);
         memcpy(data, &lightUbo, sizeof(lightUbo));
@@ -1380,7 +1479,7 @@ private:
         PBRMaterial material{};
         material.albedo = glm::vec3(1.0f, 1.0f, 1.0f);
         material.metallic = 0.5f;
-        material.roughness = 0.2f;
+        material.roughness = 0.1f; //+ (sinf(time*8.0f) / 2.0f);
         material.ao = 0.5f;
         
         vmaMapMemory(allocator, materialUniformBufferAllocations[currentImage], &data);
