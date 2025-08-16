@@ -1,0 +1,93 @@
+cmake_minimum_required(VERSION 3.16)
+project(GLORY)
+
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+find_package(Vulkan REQUIRED)
+
+include(FetchContent)
+
+# Only essential dependencies for Sponza rendering
+FetchContent_Declare(
+    SDL3 STATIC
+    GIT_REPOSITORY "https://github.com/libsdl-org/SDL.git"
+    GIT_TAG "main"
+)
+set(SDL_TESTS OFF CACHE BOOL "" FORCE)
+set(SDL_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(SDL_INSTALL OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(SDL3)
+
+FetchContent_Declare(
+    glm STATIC
+    GIT_REPOSITORY "https://github.com/g-truc/glm.git"
+)
+FetchContent_MakeAvailable(glm)
+
+FetchContent_Declare(
+    volk STATIC
+    GIT_REPOSITORY "https://github.com/zeux/volk.git"
+)
+FetchContent_MakeAvailable(volk)
+
+FetchContent_Declare(
+    glslang STATIC
+    GIT_REPOSITORY "https://github.com/KhronosGroup/glslang.git"
+    GIT_TAG "main"
+)
+FetchContent_MakeAvailable(glslang)
+
+FetchContent_Declare(
+    VulkanMemoryAllocator STATIC
+    GIT_REPOSITORY "https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git"
+    GIT_TAG "v3.3.0"
+)
+FetchContent_MakeAvailable(VulkanMemoryAllocator)
+
+FetchContent_Declare(
+    assimp STATIC
+    GIT_REPOSITORY "https://github.com/assimp/assimp.git"
+    GIT_TAG "v5.4.3"
+)
+# Minimal Assimp configuration
+set(ASSIMP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(ASSIMP_INSTALL OFF CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_ASSIMP_TOOLS OFF CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_SAMPLES OFF CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_ALL_EXPORTERS_BY_DEFAULT OFF CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_ALL_IMPORTERS_BY_DEFAULT OFF CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_GLTF_IMPORTER ON CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_OBJ_IMPORTER ON CACHE BOOL "" FORCE)
+set(ASSIMP_NO_EXPORT ON CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(assimp)
+
+FetchContent_Declare(
+    stb STATIC
+    GIT_REPOSITORY "https://github.com/nothings/stb.git"
+    GIT_TAG "master"
+)
+FetchContent_MakeAvailable(stb)
+
+add_executable(GLORY
+    main.cpp
+    vma_impl.cpp
+)
+
+target_link_libraries(GLORY PUBLIC 
+    SDL3::SDL3 
+    Vulkan::Vulkan 
+    volk::volk
+    VulkanMemoryAllocator 
+    glm::glm 
+    glslang::glslang
+    assimp
+)
+
+target_include_directories(GLORY PRIVATE ${stb_SOURCE_DIR})
+
+if(MSVC)
+    target_link_options(GLORY PRIVATE "/STACK:8388608")
+    target_compile_options(GLORY PRIVATE /Zp8)
+endif()

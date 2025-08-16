@@ -23,11 +23,19 @@ VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 #include <glslang/Public/ShaderLang.h>
 #include <glslang/Public/ResourceLimits.h>
 
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb_image.h>
+#include <assimp/Importer.hpp>
+#include <assimp/scene.h>
+#include <assimp/postprocess.h>
+
 #include <iostream>
 #include <vector>
 #include <array>
 #include <fstream>
 #include <chrono>
+#include <algorithm>
+#include <cmath>
 
 vk::detail::DispatchLoaderDynamic dl;
 
@@ -52,13 +60,56 @@ struct Vertex {
     }
 };
 
+// Texture structure
+struct Texture {
+    vk::Image image;
+    VmaAllocation allocation;
+    vk::ImageView imageView;
+    vk::Sampler sampler;
+    uint32_t width, height;
+    uint32_t mipLevels = 1;
+};
+
+// Mesh structure
+struct Mesh {
+    std::vector<Vertex> vertices;
+    std::vector<uint32_t> indices;
+    vk::Buffer vertexBuffer;
+    VmaAllocation vertexBufferAllocation;
+    vk::Buffer indexBuffer;
+    VmaAllocation indexBufferAllocation;
+    uint32_t materialIndex = 0;
+    glm::mat4 transform = glm::mat4(1.0f);
+};
+
 // PBR Material properties
 struct PBRMaterial {
     alignas(16) glm::vec3 albedo{1.0f, 1.0f, 1.0f};
     alignas(4) float metallic{0.0f};
     alignas(4) float roughness{0.5f};
     alignas(4) float ao{1.0f};
+    alignas(4) int hasAlbedoTexture{0};
+    alignas(4) int hasNormalTexture{0};
+    alignas(4) int hasMetallicRoughnessTexture{0};
+    alignas(4) int hasAOTexture{0};
 };
+// Material with texture indices
+struct Material {
+    PBRMaterial properties;
+    int albedoTextureIndex = -1;
+    int normalTextureIndex = -1;
+    int metallicRoughnessTextureIndex = -1;
+    std::string name;
+};
+
+// Model structure
+struct Model {
+    std::vector<Mesh> meshes;
+    std::vector<Material> materials;
+    std::string directory;
+};
+
+
 
 // Camera/View uniform buffer
 struct CameraUBO {
@@ -66,7 +117,108 @@ struct CameraUBO {
     alignas(16) glm::mat4 proj;
     alignas(16) glm::vec3 viewPos;
     alignas(16) glm::mat4 invView;
+};
 
+// Free camera class
+class FreeCamera {
+public:
+    glm::vec3 position{0.0f, 2.0f, 5.0f};
+    glm::vec3 front{0.0f, 0.0f, -1.0f};
+    glm::vec3 up{0.0f, 1.0f, 0.0f};
+    glm::vec3 right{1.0f, 0.0f, 0.0f};
+    
+    float yaw = -90.0f;
+    float pitch = 0.0f;
+    float speed = 5.0f;
+    float sensitivity = 0.1f;
+    float zoom = 45.0f;
+    
+    bool firstMouse = true;
+    float lastX = 400.0f;
+    float lastY = 300.0f;
+    
+    void updateVectors() {
+        glm::vec3 newFront;
+        newFront.x = cos(glm::radians(yaw)) * cos(glm::radians(pitch));
+        newFront.y = sin(glm::radians(pitch));
+        newFront.z = sin(glm::radians(yaw)) * cos(glm::radians(pitch));
+        front = glm::normalize(newFront);
+        
+        right = glm::normalize(glm::cross(front, glm::vec3(0.0f, 1.0f, 0.0f)));
+        up = glm::normalize(glm::cross(right, front));
+    }
+    
+    glm::mat4 getViewMatrix() {
+        return glm::lookAt(position, position + front, up);
+    }
+    
+    void processKeyboard(const bool* keyState, float deltaTime) {
+        float velocity = speed * deltaTime;
+        
+        if (keyState[SDL_SCANCODE_W])
+            position += front * velocity;
+        if (keyState[SDL_SCANCODE_S])
+            position -= front * velocity;
+        if (keyState[SDL_SCANCODE_A])
+            position -= right * velocity;
+        if (keyState[SDL_SCANCODE_D])
+            position += right * velocity;
+        if (keyState[SDL_SCANCODE_SPACE])
+            position += up * velocity;
+        if (keyState[SDL_SCANCODE_LSHIFT])
+            position -= up * velocity;
+    }
+    
+    void processMouseMovement(float xpos, float ypos) {
+        if (firstMouse) {
+            lastX = xpos;
+            lastY = ypos;
+            firstMouse = false;
+        }
+        
+        float xoffset = xpos - lastX;
+        float yoffset = lastY - ypos; // Reversed since y-coordinates go from bottom to top
+        lastX = xpos;
+        lastY = ypos;
+        
+        xoffset *= sensitivity;
+        yoffset *= sensitivity;
+        
+        yaw += xoffset;
+        pitch += yoffset;
+        
+        // Constrain pitch
+        //if (pitch > 179.0f)
+        //    pitch = 179.0f;
+        //if (pitch < -179.0f)
+        //    pitch = -179.0f;
+        
+        updateVectors();
+    }
+    
+    void processRelativeMouseMovement(float xrel, float yrel) {
+        float xoffset = xrel * sensitivity;
+        float yoffset = -yrel * sensitivity; // Inverted for natural camera movement
+        
+        yaw += xoffset;
+        pitch += yoffset;
+        
+        // Constrain pitch but allow unlimited yaw rotation
+        if (pitch > 89.0f)
+            pitch = 89.0f;
+        if (pitch < -89.0f)
+            pitch = -89.0f;
+        
+        updateVectors();
+    }
+    
+    void processMouseScroll(float yoffset) {
+        zoom -= yoffset;
+        if (zoom < 1.0f)
+            zoom = 1.0f;
+        if (zoom > 45.0f)
+            zoom = 45.0f;
+    }
 };
 
 
@@ -97,6 +249,12 @@ private:
     vk::Pipeline graphicsPipeline;
     
     std::vector<vk::Framebuffer> swapChainFramebuffers;
+    
+    // Depth buffer
+    vk::Image depthImage;
+    VmaAllocation depthImageAllocation;
+    vk::ImageView depthImageView;
+    
     vk::CommandPool commandPool;
     std::vector<vk::CommandBuffer> commandBuffers;
     
@@ -119,12 +277,27 @@ private:
     std::vector<vk::Buffer> materialUniformBuffers;
     std::vector<VmaAllocation> materialUniformBufferAllocations;
     
+    // Textures
+    Texture defaultAlbedoTexture;
+    Texture defaultNormalTexture;
+    Texture defaultMetallicRoughnessTexture;
+    std::vector<Texture> loadedTextures;
+    
+    // Model loading
+    Model loadedModel;
+    bool useModel = false;
+    
     vk::DescriptorPool descriptorPool;
     std::vector<vk::DescriptorSet> descriptorSets;
     
     VmaAllocator allocator;
     uint32_t currentFrame = 0;
     static const int MAX_FRAMES_IN_FLIGHT = 2;
+    
+    // Camera and input
+    FreeCamera camera;
+    std::chrono::steady_clock::time_point lastFrameTime;
+    bool mouseCaptured = false;
     
     // Simple sphere vertices for PBR demo
     std::vector<Vertex> vertices;
@@ -151,15 +324,25 @@ layout(location = 1) out vec3 fragNormal;
 layout(location = 2) out vec2 fragTexCoord;
 layout(location = 3) out vec3 fragViewPos;
 layout(location = 4) out vec3 fragInvViewPos;
+layout(location = 5) out vec3 fragTangent;
 
 void main() {
-    fragPos = inPosition;
-    fragNormal = inNormal;
+    // Transform position to view space
+    vec4 viewPos = camera.view * vec4(inPosition, 1.0);
+    fragPos = viewPos.xyz;
+    
+    // Transform normal to view space (inverse transpose of view matrix for normals)
+    mat3 normalMatrix = transpose(inverse(mat3(camera.view)));
+    fragNormal = normalize(normalMatrix * inNormal);
+    
+    // Transform tangent to view space (same as normal transformation)
+    fragTangent = normalize(normalMatrix * inTangent);
+    
     fragTexCoord = inTexCoord;
     fragViewPos = camera.viewPos;
     fragInvViewPos = camera.invViewPos;
     
-    gl_Position = camera.proj * camera.view * vec4(inPosition, 1.0);
+    gl_Position = camera.proj * viewPos;
 }
 )";
     
@@ -171,18 +354,27 @@ layout(binding = 1) uniform LightUBO {
     vec3 lightColors[4];
 } lights;
 
-layout(binding = 2) uniform PBRMaterial {
+layout(push_constant) uniform PBRMaterial {
     vec3 albedo;
     float metallic;
     float roughness;
     float ao;
+    int hasAlbedoTexture;
+    int hasNormalTexture;
+    int hasMetallicRoughnessTexture;
+    int hasAOTexture;
 } material;
+
+layout(binding = 2) uniform sampler2D albedoTexture;
+layout(binding = 3) uniform sampler2D normalTexture;
+layout(binding = 4) uniform sampler2D metallicRoughnessTexture;
 
 layout(location = 0) in vec3 fragPos;
 layout(location = 1) in vec3 fragNormal;
 layout(location = 2) in vec2 fragTexCoord;
 layout(location = 3) in vec3 fragViewPos;
 layout(location = 4) in vec3 fragInvViewPos;
+layout(location = 5) in vec3 fragTangent;
 
 layout(location = 0) out vec4 outColor;
 
@@ -273,12 +465,52 @@ vec3 fresnelSchlick(float cosTheta, vec3 F0) {
     return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 1.0);
 }
 
+vec3 getNormalFromMap() {
+    if(false){
+        // Sample normal map
+        vec3 normalColor = texture(normalTexture, fragTexCoord).rgb;
+        vec3 tangentNormal = normalize(normalColor * 2.0 - 1.0);
+        
+        // Use proper tangent vectors from vertex shader
+        vec3 N = normalize(fragNormal);
+        vec3 T = normalize(fragTangent);
+        
+        // Re-orthogonalize T with respect to N (Gram-Schmidt process)
+        T = normalize(T - dot(T, N) * N);
+        
+        // Calculate bitangent
+        vec3 B = cross(N, T);
+        
+        // Create TBN matrix
+        mat3 TBN = mat3(T, B, N);
+        
+        return normalize(TBN * tangentNormal);
+    }
+    
+    return normalize(fragNormal);
+}
+
 void main() {
-    vec3 N = normalize(fragNormal);
-    vec3 V = normalize(fragPos - fragViewPos);
+    // Sample textures
+    vec3 albedo = material.hasAlbedoTexture != 0 ? 
+        texture(albedoTexture, fragTexCoord).rgb * material.albedo : 
+        material.albedo;
+    
+    vec3 metallicRoughness = material.hasMetallicRoughnessTexture != 0 ?
+        texture(metallicRoughnessTexture, fragTexCoord).rgb :
+        vec3(0.0, material.roughness, material.metallic);
+    
+    float metallic = material.hasMetallicRoughnessTexture != 0 ? 
+        metallicRoughness.b : material.metallic;
+    float roughness = material.hasMetallicRoughnessTexture != 0 ? 
+        metallicRoughness.g : material.roughness;
+    float ao = material.ao;
+    
+    vec3 N = getNormalFromMap();
+    vec3 V = normalize(-fragPos); // In view space, camera is at origin
     
     vec3 F0 = vec3(0.04);
-    F0 = mix(F0, material.albedo, material.metallic);
+    F0 = mix(F0, albedo, metallic);
     
     vec3 ambient = vec3(0.0);
 
@@ -290,8 +522,8 @@ void main() {
         float attenuation = 1.0 / (distance * distance);
         vec3 radiance = lights.lightColors[i] * attenuation;
         
-        float NDF = DistributionGGX(N, H, material.roughness);
-        float G = GeometrySmith(N, V, L, material.roughness);
+        float NDF = DistributionGGX(N, H, roughness);
+        float G = GeometrySmith(N, V, L, roughness);
 
         float NdotV = max(dot(N, V), 0.0);
         float NdotL = max(dot(N, L), 0.0);
@@ -305,7 +537,7 @@ void main() {
             
         vec3 kS = F;
         vec3 kD = vec3(1.0) - kS;
-        kD *= 1.0 - material.metallic;
+        kD *= 1.0 - metallic;
 
         vec3 specular = vec3(0.0);
 
@@ -321,10 +553,10 @@ void main() {
             specular = numerator / denominator;
         }
 
-        vec3 diffuse = kD * material.albedo / PI * NdotL;
+        vec3 diffuse = kD * albedo / PI * NdotL;
 
             // For rough surfaces, use a softer falloff
-            float softNdotL = smoothstep(-material.roughness, 1.0, NdotL);
+            float softNdotL = smoothstep(-roughness, 1.0, NdotL);
             // Standard BRDF for smooth surfaces
             Lo += (diffuse * radiance) + (specular * radiance * softNdotL);
             
@@ -336,15 +568,15 @@ void main() {
             float rim = viewRim * lightInfluence;
 
             // Make rim stronger on smooth surfaces
-            rim *= (1.0 - material.roughness * 0.5);
+            rim *= (1.0 - roughness * 0.5);
 
-            vec3 rimColor = lights.lightColors[i] * rim * 0.02; // Use actual light color
+            vec3 rimColor = lights.lightColors[i] * rim * 0.002; // Use actual light color
             Lo += rimColor * radiance;
 
 
     }
     
-    ambient += vec3(0.003) * material.albedo * material.ao;
+    ambient += vec3(0.003) * albedo * ao;
     vec3 color = ambient + Lo;
     
     // HDR tonemapping
@@ -365,12 +597,14 @@ public:
         if (!createVMA()) return false;
         if (!createSwapChain()) return false;
         if (!createRenderPass()) return false;
+        if (!createDepthResources()) return false;
         if (!createDescriptorSetLayout()) return false;
         if (!createGraphicsPipeline()) return false;
         if (!createFramebuffers()) return false;
         if (!createCommandPool()) return false;
         if (!createVertexBuffer()) return false;
         if (!createUniformBuffers()) return false;
+        if (!createDefaultTextures()) return false;
         if (!createDescriptorPool()) return false;
         if (!createDescriptorSets()) return false;
         if (!createCommandBuffers()) return false;
@@ -379,15 +613,74 @@ public:
         return true;
     }
     
+    void loadSponzaIfAvailable() {
+        std::string sponzaPath = "assets/models/sponza/Sponza.gltf";
+        std::ifstream file(sponzaPath);
+        if (file.good()) {
+            file.close();
+            try {
+                std::cout << "Loading Sponza model..." << std::endl;
+                loadedModel = loadModel(sponzaPath);
+                useModel = true;
+                std::cout << "Sponza loaded successfully! Meshes: " << loadedModel.meshes.size() 
+                         << ", Materials: " << loadedModel.materials.size() << std::endl;
+            } catch (const std::exception& e) {
+                std::cerr << "Failed to load Sponza: " << e.what() << std::endl;
+                useModel = false;
+            }
+        } else {
+            std::cout << "Sponza model not found at " << sponzaPath << ", using default sphere." << std::endl;
+        }
+    }
+    
     void run() {
+        // Try to load Sponza after initialization
+        loadSponzaIfAvailable();
+        
+        // Initialize timing
+        lastFrameTime = std::chrono::steady_clock::now();
+        
         bool running = true;
         SDL_Event event;
         
+        // Enable relative mouse mode for freecam
+        SDL_SetWindowRelativeMouseMode(window,true);
+        mouseCaptured = true;
+        
         while (running) {
+            // Calculate delta time
+            auto currentFrameTime = std::chrono::steady_clock::now();
+            float deltaTime = std::chrono::duration<float>(currentFrameTime - lastFrameTime).count();
+            lastFrameTime = currentFrameTime;
+            
             while (SDL_PollEvent(&event)) {
                 if (event.type == SDL_EVENT_QUIT) {
                     running = false;
                 }
+                if (event.type == SDL_EVENT_KEY_DOWN) {
+                    if (event.key.key == SDLK_R) {
+                        // Reload model on R key press
+                        loadSponzaIfAvailable();
+                    }
+                    if (event.key.key == SDLK_ESCAPE) {
+                        // Toggle mouse capture
+                        mouseCaptured = !mouseCaptured;
+                        SDL_SetWindowRelativeMouseMode(window,mouseCaptured);
+                    }
+                }
+                if (event.type == SDL_EVENT_MOUSE_MOTION && mouseCaptured) {
+                    // Use relative mouse movement for free rotation
+                    camera.processRelativeMouseMovement(static_cast<float>(event.motion.xrel), static_cast<float>(event.motion.yrel));
+                }
+                if (event.type == SDL_EVENT_MOUSE_WHEEL && mouseCaptured) {
+                    camera.processMouseScroll(static_cast<float>(event.wheel.y));
+                }
+            }
+            
+            // Process keyboard input for camera movement
+            if (mouseCaptured) {
+                const bool* keyState = SDL_GetKeyboardState(nullptr);
+                camera.processKeyboard(keyState, deltaTime);
             }
             
             drawFrame();
@@ -419,6 +712,35 @@ public:
                 vmaDestroyBuffer(allocator, cameraUniformBuffers[i], cameraUniformBufferAllocations[i]);
                 vmaDestroyBuffer(allocator, lightUniformBuffers[i], lightUniformBufferAllocations[i]);
                 vmaDestroyBuffer(allocator, materialUniformBuffers[i], materialUniformBufferAllocations[i]);
+            }
+            
+            // Cleanup textures
+            auto cleanupTexture = [this](Texture& texture) {
+                if (texture.sampler) device.destroySampler(texture.sampler);
+                if (texture.imageView) device.destroyImageView(texture.imageView);
+                if (texture.image) vmaDestroyImage(allocator, texture.image, texture.allocation);
+            };
+            
+            cleanupTexture(defaultAlbedoTexture);
+            cleanupTexture(defaultNormalTexture);
+            cleanupTexture(defaultMetallicRoughnessTexture);
+            
+            for (auto& texture : loadedTextures) {
+                cleanupTexture(texture);
+            }
+            
+            // Cleanup depth buffer
+            if (depthImageView) device.destroyImageView(depthImageView);
+            if (depthImage) vmaDestroyImage(allocator, depthImage, depthImageAllocation);
+            
+            // Cleanup model buffers
+            for (auto& mesh : loadedModel.meshes) {
+                if (mesh.vertexBuffer) {
+                    vmaDestroyBuffer(allocator, mesh.vertexBuffer, mesh.vertexBufferAllocation);
+                }
+                if (mesh.indexBuffer) {
+                    vmaDestroyBuffer(allocator, mesh.indexBuffer, mesh.indexBufferAllocation);
+                }
             }
             
             // Cleanup Vulkan objects
@@ -763,6 +1085,23 @@ private:
         return true;
     }
     
+    vk::Format findDepthFormat() {
+        std::vector<vk::Format> candidates = {
+            vk::Format::eD32Sfloat,
+            vk::Format::eD32SfloatS8Uint,
+            vk::Format::eD24UnormS8Uint
+        };
+        
+        for (vk::Format format : candidates) {
+            auto props = physicalDevice.getFormatProperties(format);
+            if ((props.optimalTilingFeatures & vk::FormatFeatureFlagBits::eDepthStencilAttachment) == vk::FormatFeatureFlagBits::eDepthStencilAttachment) {
+                return format;
+            }
+        }
+        
+        throw std::runtime_error("Failed to find supported depth format!");
+    }
+
     bool createRenderPass() {
         auto colorAttachment = vk::AttachmentDescription();
             colorAttachment.format = swapChainImageFormat;
@@ -774,18 +1113,34 @@ private:
             colorAttachment.initialLayout = vk::ImageLayout::eUndefined;
             colorAttachment.finalLayout = vk::ImageLayout::ePresentSrcKHR;
         
+        auto depthAttachment = vk::AttachmentDescription();
+            depthAttachment.format = findDepthFormat();
+            depthAttachment.samples = vk::SampleCountFlagBits::e1;
+            depthAttachment.loadOp = vk::AttachmentLoadOp::eClear;
+            depthAttachment.storeOp = vk::AttachmentStoreOp::eDontCare;
+            depthAttachment.stencilLoadOp = vk::AttachmentLoadOp::eDontCare;
+            depthAttachment.stencilStoreOp = vk::AttachmentStoreOp::eDontCare;
+            depthAttachment.initialLayout = vk::ImageLayout::eUndefined;
+            depthAttachment.finalLayout = vk::ImageLayout::eDepthStencilAttachmentOptimal;
+        
         auto colorAttachmentRef = vk::AttachmentReference();
             colorAttachmentRef.attachment = 0;
             colorAttachmentRef.layout = vk::ImageLayout::eColorAttachmentOptimal;
+            
+        auto depthAttachmentRef = vk::AttachmentReference();
+            depthAttachmentRef.attachment = 1;
+            depthAttachmentRef.layout = vk::ImageLayout::eDepthStencilAttachmentOptimal;
         
         auto subpass = vk::SubpassDescription();
             subpass.pipelineBindPoint = vk::PipelineBindPoint::eGraphics;
             subpass.colorAttachmentCount = 1;
             subpass.pColorAttachments = &colorAttachmentRef;
+            subpass.pDepthStencilAttachment = &depthAttachmentRef;
         
+        std::array<vk::AttachmentDescription, 2> attachments = {colorAttachment, depthAttachment};
         auto renderPassInfo = vk::RenderPassCreateInfo();
-            renderPassInfo.attachmentCount = 1;
-            renderPassInfo.pAttachments = &colorAttachment;
+            renderPassInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
+            renderPassInfo.pAttachments = attachments.data();
             renderPassInfo.subpassCount = 1;
             renderPassInfo.pSubpasses = &subpass;
         
@@ -798,8 +1153,19 @@ private:
         return true;
     }
     
+    bool createDepthResources() {
+        vk::Format depthFormat = findDepthFormat();
+        
+        createImage(swapChainExtent.width, swapChainExtent.height, 1, depthFormat, vk::ImageTiling::eOptimal,
+                   vk::ImageUsageFlagBits::eDepthStencilAttachment, depthImage, depthImageAllocation);
+        
+        depthImageView = createImageView(depthImage, depthFormat, vk::ImageAspectFlagBits::eDepth, 1);
+        
+        return true;
+    }
+    
     bool createDescriptorSetLayout() {
-        std::array<vk::DescriptorSetLayoutBinding, 3> bindings{};
+        std::array<vk::DescriptorSetLayoutBinding, 5> bindings{};
         
         // Camera uniform buffer
         bindings[0].binding = 0;
@@ -815,12 +1181,26 @@ private:
         bindings[1].pImmutableSamplers = nullptr;
         bindings[1].stageFlags = vk::ShaderStageFlagBits::eFragment;
         
-        // Material uniform buffer
+        // Albedo texture (now binding 2)
         bindings[2].binding = 2;
         bindings[2].descriptorCount = 1;
-        bindings[2].descriptorType = vk::DescriptorType::eUniformBuffer;
+        bindings[2].descriptorType = vk::DescriptorType::eCombinedImageSampler;
         bindings[2].pImmutableSamplers = nullptr;
         bindings[2].stageFlags = vk::ShaderStageFlagBits::eFragment;
+        
+        // Normal texture (now binding 3)
+        bindings[3].binding = 3;
+        bindings[3].descriptorCount = 1;
+        bindings[3].descriptorType = vk::DescriptorType::eCombinedImageSampler;
+        bindings[3].pImmutableSamplers = nullptr;
+        bindings[3].stageFlags = vk::ShaderStageFlagBits::eFragment;
+        
+        // Metallic/Roughness texture (now binding 4)
+        bindings[4].binding = 4;
+        bindings[4].descriptorCount = 1;
+        bindings[4].descriptorType = vk::DescriptorType::eCombinedImageSampler;
+        bindings[4].pImmutableSamplers = nullptr;
+        bindings[4].stageFlags = vk::ShaderStageFlagBits::eFragment;
         
         auto layoutInfo = vk::DescriptorSetLayoutCreateInfo();
         layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
@@ -987,6 +1367,679 @@ private:
         return spirv;
     }
     
+    uint32_t findMemoryType(uint32_t typeFilter, vk::MemoryPropertyFlags properties) {
+        auto memProperties = physicalDevice.getMemoryProperties();
+        
+        for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
+            if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
+                return i;
+            }
+        }
+        
+        throw std::runtime_error("Failed to find suitable memory type!");
+    }
+    
+    void createImage(uint32_t width, uint32_t height, uint32_t mipLevels, vk::Format format, 
+                     vk::ImageTiling tiling, vk::ImageUsageFlags usage, vk::Image& image, VmaAllocation& allocation) {
+        auto imageInfo = vk::ImageCreateInfo();
+        imageInfo.imageType = vk::ImageType::e2D;
+        imageInfo.extent.width = width;
+        imageInfo.extent.height = height;
+        imageInfo.extent.depth = 1;
+        imageInfo.mipLevels = mipLevels;
+        imageInfo.arrayLayers = 1;
+        imageInfo.format = format;
+        imageInfo.tiling = tiling;
+        imageInfo.initialLayout = vk::ImageLayout::eUndefined;
+        imageInfo.usage = usage;
+        imageInfo.samples = vk::SampleCountFlagBits::e1;
+        imageInfo.sharingMode = vk::SharingMode::eExclusive;
+        
+        VmaAllocationCreateInfo allocInfo{};
+        allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+        
+        if (vmaCreateImage(allocator, reinterpret_cast<VkImageCreateInfo*>(&imageInfo), &allocInfo,
+                          reinterpret_cast<VkImage*>(&image), &allocation, nullptr) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create image!");
+        }
+    }
+    
+    vk::ImageView createImageView(vk::Image image, vk::Format format, vk::ImageAspectFlags aspectFlags, uint32_t mipLevels) {
+        auto viewInfo = vk::ImageViewCreateInfo();
+        viewInfo.image = image;
+        viewInfo.viewType = vk::ImageViewType::e2D;
+        viewInfo.format = format;
+        viewInfo.subresourceRange.aspectMask = aspectFlags;
+        viewInfo.subresourceRange.baseMipLevel = 0;
+        viewInfo.subresourceRange.levelCount = mipLevels;
+        viewInfo.subresourceRange.baseArrayLayer = 0;
+        viewInfo.subresourceRange.layerCount = 1;
+        
+        return device.createImageView(viewInfo).value;
+    }
+    
+    void transitionImageLayout(vk::Image image, vk::Format format, vk::ImageLayout oldLayout, vk::ImageLayout newLayout, uint32_t mipLevels) {
+        auto commandBuffer = beginSingleTimeCommands();
+        
+        auto barrier = vk::ImageMemoryBarrier();
+        barrier.oldLayout = oldLayout;
+        barrier.newLayout = newLayout;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = image;
+        barrier.subresourceRange.aspectMask = vk::ImageAspectFlagBits::eColor;
+        barrier.subresourceRange.baseMipLevel = 0;
+        barrier.subresourceRange.levelCount = mipLevels;
+        barrier.subresourceRange.baseArrayLayer = 0;
+        barrier.subresourceRange.layerCount = 1;
+        
+        vk::PipelineStageFlags sourceStage;
+        vk::PipelineStageFlags destinationStage;
+        
+        if (oldLayout == vk::ImageLayout::eUndefined && newLayout == vk::ImageLayout::eTransferDstOptimal) {
+            barrier.srcAccessMask = {};
+            barrier.dstAccessMask = vk::AccessFlagBits::eTransferWrite;
+            
+            sourceStage = vk::PipelineStageFlagBits::eTopOfPipe;
+            destinationStage = vk::PipelineStageFlagBits::eTransfer;
+        } else if (oldLayout == vk::ImageLayout::eTransferDstOptimal && newLayout == vk::ImageLayout::eShaderReadOnlyOptimal) {
+            barrier.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+            barrier.dstAccessMask = vk::AccessFlagBits::eShaderRead;
+            
+            sourceStage = vk::PipelineStageFlagBits::eTransfer;
+            destinationStage = vk::PipelineStageFlagBits::eFragmentShader;
+        } else {
+            throw std::invalid_argument("Unsupported layout transition!");
+        }
+        
+        commandBuffer.pipelineBarrier(sourceStage, destinationStage, {}, 0, nullptr, 0, nullptr, 1, &barrier);
+        
+        endSingleTimeCommands(commandBuffer);
+    }
+    
+    void copyBufferToImage(vk::Buffer buffer, vk::Image image, uint32_t width, uint32_t height) {
+        auto commandBuffer = beginSingleTimeCommands();
+        
+        auto region = vk::BufferImageCopy();
+        region.bufferOffset = 0;
+        region.bufferRowLength = 0;
+        region.bufferImageHeight = 0;
+        region.imageSubresource.aspectMask = vk::ImageAspectFlagBits::eColor;
+        region.imageSubresource.mipLevel = 0;
+        region.imageSubresource.baseArrayLayer = 0;
+        region.imageSubresource.layerCount = 1;
+        region.imageOffset = vk::Offset3D{0, 0, 0};
+        region.imageExtent = vk::Extent3D{width, height, 1};
+        
+        commandBuffer.copyBufferToImage(buffer, image, vk::ImageLayout::eTransferDstOptimal, 1, &region);
+        
+        endSingleTimeCommands(commandBuffer);
+    }
+    
+    vk::CommandBuffer beginSingleTimeCommands() {
+        auto allocInfo = vk::CommandBufferAllocateInfo();
+        allocInfo.level = vk::CommandBufferLevel::ePrimary;
+        allocInfo.commandPool = commandPool;
+        allocInfo.commandBufferCount = 1;
+        
+        auto commandBuffer = device.allocateCommandBuffers(allocInfo).value[0];
+        
+        auto beginInfo = vk::CommandBufferBeginInfo();
+        beginInfo.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit;
+        
+        commandBuffer.begin(beginInfo);
+        
+        return commandBuffer;
+    }
+    
+    void endSingleTimeCommands(vk::CommandBuffer commandBuffer) {
+        commandBuffer.end();
+        
+        auto submitInfo = vk::SubmitInfo();
+        submitInfo.commandBufferCount = 1;
+        submitInfo.pCommandBuffers = &commandBuffer;
+        
+        graphicsQueue.submit(1, &submitInfo, nullptr);
+        graphicsQueue.waitIdle();
+        
+        device.freeCommandBuffers(commandPool, 1, &commandBuffer);
+    }
+    
+    Texture loadTexture(const std::string& path) {
+        int texWidth, texHeight, texChannels;
+        stbi_uc* pixels = stbi_load(path.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
+        vk::DeviceSize imageSize = texWidth * texHeight * 4;
+        
+        if (!pixels) {
+            throw std::runtime_error("Failed to load texture image: " + path);
+        }
+        
+        uint32_t mipLevels = static_cast<uint32_t>(std::floor(std::log2(std::max(texWidth, texHeight)))) + 1;
+        
+        // Create staging buffer
+        vk::Buffer stagingBuffer;
+        VmaAllocation stagingAllocation;
+        
+        auto bufferInfo = vk::BufferCreateInfo();
+        bufferInfo.size = imageSize;
+        bufferInfo.usage = vk::BufferUsageFlagBits::eTransferSrc;
+        bufferInfo.sharingMode = vk::SharingMode::eExclusive;
+        
+        VmaAllocationCreateInfo allocInfo{};
+        allocInfo.usage = VMA_MEMORY_USAGE_CPU_ONLY;
+        
+        vmaCreateBuffer(allocator, reinterpret_cast<VkBufferCreateInfo*>(&bufferInfo), &allocInfo,
+                       reinterpret_cast<VkBuffer*>(&stagingBuffer), &stagingAllocation, nullptr);
+        
+        void* data;
+        vmaMapMemory(allocator, stagingAllocation, &data);
+        memcpy(data, pixels, static_cast<size_t>(imageSize));
+        vmaUnmapMemory(allocator, stagingAllocation);
+        
+        stbi_image_free(pixels);
+        
+        Texture texture;
+        texture.width = texWidth;
+        texture.height = texHeight;
+        texture.mipLevels = mipLevels;
+        
+        createImage(texWidth, texHeight, mipLevels, vk::Format::eR8G8B8A8Srgb, vk::ImageTiling::eOptimal,
+                   vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferSrc,
+                   texture.image, texture.allocation);
+        
+        transitionImageLayout(texture.image, vk::Format::eR8G8B8A8Srgb, vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal, mipLevels);
+        copyBufferToImage(stagingBuffer, texture.image, static_cast<uint32_t>(texWidth), static_cast<uint32_t>(texHeight));
+        
+        vmaDestroyBuffer(allocator, stagingBuffer, stagingAllocation);
+        
+        generateMipmaps(texture.image, vk::Format::eR8G8B8A8Srgb, texWidth, texHeight, mipLevels);
+        
+        texture.imageView = createImageView(texture.image, vk::Format::eR8G8B8A8Srgb, vk::ImageAspectFlagBits::eColor, mipLevels);
+        
+        // Create sampler
+        auto samplerInfo = vk::SamplerCreateInfo();
+        samplerInfo.magFilter = vk::Filter::eLinear;
+        samplerInfo.minFilter = vk::Filter::eLinear;
+        samplerInfo.addressModeU = vk::SamplerAddressMode::eRepeat;
+        samplerInfo.addressModeV = vk::SamplerAddressMode::eRepeat;
+        samplerInfo.addressModeW = vk::SamplerAddressMode::eRepeat;
+        samplerInfo.anisotropyEnable = VK_TRUE;
+        
+        auto properties = physicalDevice.getProperties();
+        samplerInfo.maxAnisotropy = properties.limits.maxSamplerAnisotropy;
+        samplerInfo.borderColor = vk::BorderColor::eIntOpaqueBlack;
+        samplerInfo.unnormalizedCoordinates = VK_FALSE;
+        samplerInfo.compareEnable = VK_FALSE;
+        samplerInfo.compareOp = vk::CompareOp::eAlways;
+        samplerInfo.mipmapMode = vk::SamplerMipmapMode::eLinear;
+        samplerInfo.mipLodBias = -0.5f; // Slight bias toward higher mip levels to reduce aliasing
+        samplerInfo.minLod = 0.0f;
+        samplerInfo.maxLod = static_cast<float>(mipLevels);
+        
+        texture.sampler = device.createSampler(samplerInfo).value;
+        
+        return texture;
+    }
+    
+    void generateMipmaps(vk::Image image, vk::Format imageFormat, int32_t texWidth, int32_t texHeight, uint32_t mipLevels) {
+        auto commandBuffer = beginSingleTimeCommands();
+        
+        auto barrier = vk::ImageMemoryBarrier();
+        barrier.image = image;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.subresourceRange.aspectMask = vk::ImageAspectFlagBits::eColor;
+        barrier.subresourceRange.baseArrayLayer = 0;
+        barrier.subresourceRange.layerCount = 1;
+        barrier.subresourceRange.levelCount = 1;
+        
+        int32_t mipWidth = texWidth;
+        int32_t mipHeight = texHeight;
+        
+        for (uint32_t i = 1; i < mipLevels; i++) {
+            barrier.subresourceRange.baseMipLevel = i - 1;
+            barrier.oldLayout = vk::ImageLayout::eTransferDstOptimal;
+            barrier.newLayout = vk::ImageLayout::eTransferSrcOptimal;
+            barrier.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+            barrier.dstAccessMask = vk::AccessFlagBits::eTransferRead;
+            
+            commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eTransfer, {},
+                                        0, nullptr, 0, nullptr, 1, &barrier);
+            
+            auto blit = vk::ImageBlit();
+            blit.srcOffsets[0] = vk::Offset3D{0, 0, 0};
+            blit.srcOffsets[1] = vk::Offset3D{mipWidth, mipHeight, 1};
+            blit.srcSubresource.aspectMask = vk::ImageAspectFlagBits::eColor;
+            blit.srcSubresource.mipLevel = i - 1;
+            blit.srcSubresource.baseArrayLayer = 0;
+            blit.srcSubresource.layerCount = 1;
+            blit.dstOffsets[0] = vk::Offset3D{0, 0, 0};
+            blit.dstOffsets[1] = vk::Offset3D{mipWidth > 1 ? mipWidth / 2 : 1, mipHeight > 1 ? mipHeight / 2 : 1, 1};
+            blit.dstSubresource.aspectMask = vk::ImageAspectFlagBits::eColor;
+            blit.dstSubresource.mipLevel = i;
+            blit.dstSubresource.baseArrayLayer = 0;
+            blit.dstSubresource.layerCount = 1;
+            
+            commandBuffer.blitImage(image, vk::ImageLayout::eTransferSrcOptimal,
+                                  image, vk::ImageLayout::eTransferDstOptimal,
+                                  1, &blit, vk::Filter::eLinear);
+            
+            barrier.oldLayout = vk::ImageLayout::eTransferSrcOptimal;
+            barrier.newLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
+            barrier.srcAccessMask = vk::AccessFlagBits::eTransferRead;
+            barrier.dstAccessMask = vk::AccessFlagBits::eShaderRead;
+            
+            commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eFragmentShader, {},
+                                        0, nullptr, 0, nullptr, 1, &barrier);
+            
+            if (mipWidth > 1) mipWidth /= 2;
+            if (mipHeight > 1) mipHeight /= 2;
+        }
+        
+        barrier.subresourceRange.baseMipLevel = mipLevels - 1;
+        barrier.oldLayout = vk::ImageLayout::eTransferDstOptimal;
+        barrier.newLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
+        barrier.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+        barrier.dstAccessMask = vk::AccessFlagBits::eShaderRead;
+        
+        commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eFragmentShader, {},
+                                    0, nullptr, 0, nullptr, 1, &barrier);
+        
+        endSingleTimeCommands(commandBuffer);
+    }
+    
+    bool createDefaultTextures() {
+        // Create 1x1 default textures
+        uint8_t whitePixel[4] = {255, 255, 255, 255};
+        uint8_t normalPixel[4] = {128, 128, 255, 255}; // Default normal (0, 0, 1) in tangent space
+        uint8_t metallicRoughnessPixel[4] = {0, 128, 0, 255}; // No metallic, 0.5 roughness
+        
+        defaultAlbedoTexture = createDefaultTexture(whitePixel);
+        defaultNormalTexture = createDefaultTexture(normalPixel);
+        defaultMetallicRoughnessTexture = createDefaultTexture(metallicRoughnessPixel);
+        
+        return true;
+    }
+    
+    Texture createDefaultTexture(uint8_t* pixelData) {
+        vk::DeviceSize imageSize = 4; // 1x1 RGBA
+        
+        // Create staging buffer
+        vk::Buffer stagingBuffer;
+        VmaAllocation stagingAllocation;
+        
+        auto bufferInfo = vk::BufferCreateInfo();
+        bufferInfo.size = imageSize;
+        bufferInfo.usage = vk::BufferUsageFlagBits::eTransferSrc;
+        bufferInfo.sharingMode = vk::SharingMode::eExclusive;
+        
+        VmaAllocationCreateInfo allocInfo{};
+        allocInfo.usage = VMA_MEMORY_USAGE_CPU_ONLY;
+        
+        vmaCreateBuffer(allocator, reinterpret_cast<VkBufferCreateInfo*>(&bufferInfo), &allocInfo,
+                       reinterpret_cast<VkBuffer*>(&stagingBuffer), &stagingAllocation, nullptr);
+        
+        void* data;
+        vmaMapMemory(allocator, stagingAllocation, &data);
+        memcpy(data, pixelData, static_cast<size_t>(imageSize));
+        vmaUnmapMemory(allocator, stagingAllocation);
+        
+        Texture texture;
+        texture.width = 1;
+        texture.height = 1;
+        texture.mipLevels = 1;
+        
+        createImage(1, 1, 1, vk::Format::eR8G8B8A8Srgb, vk::ImageTiling::eOptimal,
+                   vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled,
+                   texture.image, texture.allocation);
+        
+        transitionImageLayout(texture.image, vk::Format::eR8G8B8A8Srgb, vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal, 1);
+        copyBufferToImage(stagingBuffer, texture.image, 1, 1);
+        transitionImageLayout(texture.image, vk::Format::eR8G8B8A8Srgb, vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eShaderReadOnlyOptimal, 1);
+        
+        vmaDestroyBuffer(allocator, stagingBuffer, stagingAllocation);
+        
+        texture.imageView = createImageView(texture.image, vk::Format::eR8G8B8A8Srgb, vk::ImageAspectFlagBits::eColor, 1);
+        
+        // Create sampler
+        auto samplerInfo = vk::SamplerCreateInfo();
+        samplerInfo.magFilter = vk::Filter::eLinear;
+        samplerInfo.minFilter = vk::Filter::eLinear;
+        samplerInfo.addressModeU = vk::SamplerAddressMode::eRepeat;
+        samplerInfo.addressModeV = vk::SamplerAddressMode::eRepeat;
+        samplerInfo.addressModeW = vk::SamplerAddressMode::eRepeat;
+        samplerInfo.anisotropyEnable = VK_FALSE;
+        samplerInfo.borderColor = vk::BorderColor::eIntOpaqueBlack;
+        samplerInfo.unnormalizedCoordinates = VK_FALSE;
+        samplerInfo.compareEnable = VK_FALSE;
+        samplerInfo.compareOp = vk::CompareOp::eAlways;
+        samplerInfo.mipmapMode = vk::SamplerMipmapMode::eLinear;
+        samplerInfo.mipLodBias = 0.0f;
+        samplerInfo.minLod = 0.0f;
+        samplerInfo.maxLod = 0.0f;
+        
+        texture.sampler = device.createSampler(samplerInfo).value;
+        
+        return texture;
+    }
+    
+    void updateMaterialDescriptors(uint32_t frameIndex, uint32_t materialIndex) {
+        if (materialIndex >= loadedModel.materials.size()) {
+            return; // Use default material/textures
+        }
+        
+        const Material& material = loadedModel.materials[materialIndex];
+        
+        // Determine which textures to use
+        const Texture* albedoTex = (material.albedoTextureIndex >= 0 && material.albedoTextureIndex < loadedTextures.size()) 
+            ? &loadedTextures[material.albedoTextureIndex] : &defaultAlbedoTexture;
+        const Texture* normalTex = (material.normalTextureIndex >= 0 && material.normalTextureIndex < loadedTextures.size()) 
+            ? &loadedTextures[material.normalTextureIndex] : &defaultNormalTexture;
+        const Texture* metallicRoughnessTex = (material.metallicRoughnessTextureIndex >= 0 && material.metallicRoughnessTextureIndex < loadedTextures.size()) 
+            ? &loadedTextures[material.metallicRoughnessTextureIndex] : &defaultMetallicRoughnessTexture;
+        
+        // Update texture descriptors
+        std::array<vk::WriteDescriptorSet, 3> textureWrites{};
+        
+        vk::DescriptorImageInfo albedoImageInfo{};
+        albedoImageInfo.imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
+        albedoImageInfo.imageView = albedoTex->imageView;
+        albedoImageInfo.sampler = albedoTex->sampler;
+        
+        vk::DescriptorImageInfo normalImageInfo{};
+        normalImageInfo.imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
+        normalImageInfo.imageView = normalTex->imageView;
+        normalImageInfo.sampler = normalTex->sampler;
+        
+        vk::DescriptorImageInfo metallicRoughnessImageInfo{};
+        metallicRoughnessImageInfo.imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
+        metallicRoughnessImageInfo.imageView = metallicRoughnessTex->imageView;
+        metallicRoughnessImageInfo.sampler = metallicRoughnessTex->sampler;
+        
+        // Albedo texture
+        textureWrites[0].dstSet = descriptorSets[frameIndex];
+        textureWrites[0].dstBinding = 2;
+        textureWrites[0].dstArrayElement = 0;
+        textureWrites[0].descriptorCount = 1;
+        textureWrites[0].descriptorType = vk::DescriptorType::eCombinedImageSampler;
+        textureWrites[0].pImageInfo = &albedoImageInfo;
+        
+        // Normal texture
+        textureWrites[1].dstSet = descriptorSets[frameIndex];
+        textureWrites[1].dstBinding = 3;
+        textureWrites[1].dstArrayElement = 0;
+        textureWrites[1].descriptorCount = 1;
+        textureWrites[1].descriptorType = vk::DescriptorType::eCombinedImageSampler;
+        textureWrites[1].pImageInfo = &normalImageInfo;
+        
+        // Metallic/Roughness texture
+        textureWrites[2].dstSet = descriptorSets[frameIndex];
+        textureWrites[2].dstBinding = 4;
+        textureWrites[2].dstArrayElement = 0;
+        textureWrites[2].descriptorCount = 1;
+        textureWrites[2].descriptorType = vk::DescriptorType::eCombinedImageSampler;
+        textureWrites[2].pImageInfo = &metallicRoughnessImageInfo;
+        
+        device.updateDescriptorSets(static_cast<uint32_t>(textureWrites.size()), textureWrites.data(), 0, nullptr);
+    }
+    
+    PBRMaterial getMaterialProperties(uint32_t materialIndex) {
+        if (materialIndex >= loadedModel.materials.size()) {
+            // Return default material
+            PBRMaterial defaultMat{};
+            defaultMat.albedo = glm::vec3(1.0f);
+            defaultMat.metallic = 0.0f;
+            defaultMat.roughness = 0.5f;
+            defaultMat.ao = 1.0f;
+            defaultMat.hasAlbedoTexture = 0;
+            defaultMat.hasNormalTexture = 0;
+            defaultMat.hasMetallicRoughnessTexture = 0;
+            defaultMat.hasAOTexture = 0;
+            return defaultMat;
+        }
+        return loadedModel.materials[materialIndex].properties;
+    }
+    
+    Model loadModel(const std::string& path) {
+        Assimp::Importer importer;
+        const aiScene* scene = importer.ReadFile(path, 
+            aiProcess_Triangulate | 
+            aiProcess_FlipUVs | 
+            aiProcess_CalcTangentSpace |
+            aiProcess_GenNormals |
+            aiProcess_JoinIdenticalVertices |
+            aiProcess_OptimizeMeshes);
+        
+        if (!scene || scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE || !scene->mRootNode) {
+            throw std::runtime_error("Failed to load model: " + path + " - " + importer.GetErrorString());
+        }
+        
+        Model model;
+        model.directory = path.substr(0, path.find_last_of('/'));
+        
+        // Load materials
+        loadMaterials(scene, model);
+        
+        // Process nodes recursively with 10% scale
+        glm::mat4 scaleMatrix = glm::scale(glm::mat4(1.0f), glm::vec3(0.5f));
+        processNode(scene->mRootNode, scene, model, scaleMatrix);
+        
+        // Create GPU buffers for all meshes
+        for (auto& mesh : model.meshes) {
+            createMeshBuffers(mesh);
+        }
+        
+        return model;
+    }
+    
+    void loadMaterials(const aiScene* scene, Model& model) {
+        for (unsigned int i = 0; i < scene->mNumMaterials; i++) {
+            const aiMaterial* mat = scene->mMaterials[i];
+            Material material;
+            
+            // Load material properties
+            aiColor3D color(0.0f, 0.0f, 0.0f);
+            float value;
+            
+            if (mat->Get(AI_MATKEY_COLOR_DIFFUSE, color) == AI_SUCCESS) {
+                material.properties.albedo = glm::vec3(color.r, color.g, color.b);
+            }
+            
+            if (mat->Get(AI_MATKEY_METALLIC_FACTOR, value) == AI_SUCCESS) {
+                material.properties.metallic = value;
+            }
+            
+            if (mat->Get(AI_MATKEY_ROUGHNESS_FACTOR, value) == AI_SUCCESS) {
+                material.properties.roughness = value;
+            }
+            
+            // Load textures - try multiple texture types as different exporters use different conventions
+            loadMaterialTextures(mat, aiTextureType_DIFFUSE, model.directory, material.albedoTextureIndex);
+            if (material.albedoTextureIndex < 0) {
+                loadMaterialTextures(mat, aiTextureType_BASE_COLOR, model.directory, material.albedoTextureIndex);
+            }
+            
+            loadMaterialTextures(mat, aiTextureType_NORMALS, model.directory, material.normalTextureIndex);
+            if (material.normalTextureIndex < 0) {
+                loadMaterialTextures(mat, aiTextureType_NORMAL_CAMERA, model.directory, material.normalTextureIndex);
+            }
+            
+            // Try multiple sources for metallic/roughness
+            loadMaterialTextures(mat, aiTextureType_METALNESS, model.directory, material.metallicRoughnessTextureIndex);
+            if (material.metallicRoughnessTextureIndex < 0) {
+                loadMaterialTextures(mat, aiTextureType_DIFFUSE_ROUGHNESS, model.directory, material.metallicRoughnessTextureIndex);
+            }
+            if (material.metallicRoughnessTextureIndex < 0) {
+                loadMaterialTextures(mat, aiTextureType_UNKNOWN, model.directory, material.metallicRoughnessTextureIndex);
+            }
+            
+            // Set material flags
+            material.properties.hasAlbedoTexture = (material.albedoTextureIndex >= 0) ? 1 : 0;
+            material.properties.hasNormalTexture = (material.normalTextureIndex >= 0) ? 1 : 0;
+            material.properties.hasMetallicRoughnessTexture = (material.metallicRoughnessTextureIndex >= 0) ? 1 : 0;
+            
+            aiString name;
+            if (mat->Get(AI_MATKEY_NAME, name) == AI_SUCCESS) {
+                material.name = name.C_Str();
+            }
+            
+            std::cout << "Material " << i << " (" << material.name << "):" << std::endl;
+            std::cout << "  Albedo: " << material.properties.albedo.x << ", " << material.properties.albedo.y << ", " << material.properties.albedo.z << std::endl;
+            std::cout << "  Metallic: " << material.properties.metallic << ", Roughness: " << material.properties.roughness << std::endl;
+            std::cout << "  Textures: Albedo=" << material.albedoTextureIndex << ", Normal=" << material.normalTextureIndex << ", MetallicRoughness=" << material.metallicRoughnessTextureIndex << std::endl;
+            std::cout << "  Flags: hasAlbedo=" << material.properties.hasAlbedoTexture << ", hasNormal=" << material.properties.hasNormalTexture << ", hasMetallicRoughness=" << material.properties.hasMetallicRoughnessTexture << std::endl;
+            
+            model.materials.push_back(material);
+        }
+    }
+    
+    void loadMaterialTextures(const aiMaterial* mat, aiTextureType type, const std::string& directory, int& textureIndex) {
+        for (unsigned int i = 0; i < mat->GetTextureCount(type); i++) {
+            aiString str;
+            mat->GetTexture(type, i, &str);
+            std::string texturePath = directory + "/" + str.C_Str();
+            
+            // Check if texture already loaded
+            bool skip = false;
+            for (size_t j = 0; j < loadedTextures.size(); j++) {
+                // We should store texture paths to avoid duplicates
+                // For now, just load each texture
+            }
+            
+            if (!skip) {
+                try {
+                    std::cout << "Loading texture: " << texturePath << std::endl;
+                    Texture texture = loadTexture(texturePath);
+                    loadedTextures.push_back(texture);
+                    textureIndex = static_cast<int>(loadedTextures.size() - 1);
+                    std::cout << "Successfully loaded texture " << texturePath << " at index " << textureIndex << std::endl;
+                } catch (const std::exception& e) {
+                    std::cerr << "Warning: Failed to load texture " << texturePath << ": " << e.what() << std::endl;
+                    textureIndex = -1;
+                }
+            }
+        }
+    }
+    
+    void processNode(aiNode* node, const aiScene* scene, Model& model, const glm::mat4& parentTransform) {
+        // Convert aiMatrix4x4 to glm::mat4
+        aiMatrix4x4 aiTrans = node->mTransformation;
+        glm::mat4 nodeTransform = glm::mat4(
+            aiTrans.a1, aiTrans.b1, aiTrans.c1, aiTrans.d1,
+            aiTrans.a2, aiTrans.b2, aiTrans.c2, aiTrans.d2,
+            aiTrans.a3, aiTrans.b3, aiTrans.c3, aiTrans.d3,
+            aiTrans.a4, aiTrans.b4, aiTrans.c4, aiTrans.d4
+        );
+        
+        glm::mat4 transform = parentTransform * nodeTransform;
+        
+        // Process all the node's meshes
+        for (unsigned int i = 0; i < node->mNumMeshes; i++) {
+            aiMesh* mesh = scene->mMeshes[node->mMeshes[i]];
+            model.meshes.push_back(processMesh(mesh, scene, transform));
+        }
+        
+        // Process children
+        for (unsigned int i = 0; i < node->mNumChildren; i++) {
+            processNode(node->mChildren[i], scene, model, transform);
+        }
+    }
+    
+    Mesh processMesh(aiMesh* mesh, const aiScene* scene, const glm::mat4& transform) {
+        Mesh result;
+        result.transform = transform;
+        result.materialIndex = mesh->mMaterialIndex;
+        
+        // Process vertices
+        for (unsigned int i = 0; i < mesh->mNumVertices; i++) {
+            Vertex vertex;
+            
+            // Position - apply transform matrix
+            glm::vec4 worldPos = transform * glm::vec4(mesh->mVertices[i].x, mesh->mVertices[i].y, mesh->mVertices[i].z, 1.0f);
+            vertex.pos.x = worldPos.x;
+            vertex.pos.y = worldPos.y;
+            vertex.pos.z = worldPos.z;
+            
+            // Normal - transform with inverse transpose
+            if (mesh->HasNormals()) {
+                glm::mat3 normalMatrix = glm::transpose(glm::inverse(glm::mat3(transform)));
+                glm::vec3 worldNormal = normalMatrix * glm::vec3(mesh->mNormals[i].x, mesh->mNormals[i].y, mesh->mNormals[i].z);
+                vertex.normal = glm::normalize(worldNormal);
+            }
+            
+            // Texture coordinates
+            if (mesh->mTextureCoords[0]) {
+                vertex.texCoord.x = mesh->mTextureCoords[0][i].x;
+                vertex.texCoord.y = mesh->mTextureCoords[0][i].y;
+            } else {
+                vertex.texCoord = glm::vec2(0.0f, 0.0f);
+            }
+            
+            // Tangent - transform like normal and store handedness in w component
+            if (mesh->HasTangentsAndBitangents()) {
+                glm::mat3 normalMatrix = glm::transpose(glm::inverse(glm::mat3(transform)));
+                glm::vec3 worldTangent = normalMatrix * glm::vec3(mesh->mTangents[i].x, mesh->mTangents[i].y, mesh->mTangents[i].z);
+                glm::vec3 worldBitangent = normalMatrix * glm::vec3(mesh->mBitangents[i].x, mesh->mBitangents[i].y, mesh->mBitangents[i].z);
+                
+                // Calculate handedness for proper bitangent reconstruction
+                glm::vec3 worldNormal = normalMatrix * glm::vec3(mesh->mNormals[i].x, mesh->mNormals[i].y, mesh->mNormals[i].z);
+                float handedness = glm::dot(glm::cross(worldNormal, worldTangent), worldBitangent) < 0.0f ? -1.0f : 1.0f;
+                
+                vertex.tangent = glm::normalize(worldTangent);
+                // We'll store handedness in a separate way since tangent is vec3
+            }
+            
+            result.vertices.push_back(vertex);
+        }
+        
+        // Process indices
+        for (unsigned int i = 0; i < mesh->mNumFaces; i++) {
+            aiFace face = mesh->mFaces[i];
+            for (unsigned int j = 0; j < face.mNumIndices; j++) {
+                result.indices.push_back(face.mIndices[j]);
+            }
+        }
+        
+        return result;
+    }
+    
+    void createMeshBuffers(Mesh& mesh) {
+        vk::DeviceSize vertexBufferSize = sizeof(mesh.vertices[0]) * mesh.vertices.size();
+        vk::DeviceSize indexBufferSize = sizeof(mesh.indices[0]) * mesh.indices.size();
+        
+        // Create vertex buffer
+        auto bufferInfo = vk::BufferCreateInfo();
+        bufferInfo.size = vertexBufferSize;
+        bufferInfo.usage = vk::BufferUsageFlagBits::eVertexBuffer;
+        bufferInfo.sharingMode = vk::SharingMode::eExclusive;
+        
+        VmaAllocationCreateInfo allocInfo{};
+        allocInfo.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
+        
+        if (vmaCreateBuffer(allocator, reinterpret_cast<VkBufferCreateInfo*>(&bufferInfo), &allocInfo, 
+                           reinterpret_cast<VkBuffer*>(&mesh.vertexBuffer), &mesh.vertexBufferAllocation, nullptr) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create vertex buffer for mesh");
+        }
+        
+        void* data;
+        vmaMapMemory(allocator, mesh.vertexBufferAllocation, &data);
+        memcpy(data, mesh.vertices.data(), static_cast<size_t>(vertexBufferSize));
+        vmaUnmapMemory(allocator, mesh.vertexBufferAllocation);
+        
+        // Create index buffer
+        bufferInfo.size = indexBufferSize;
+        bufferInfo.usage = vk::BufferUsageFlagBits::eIndexBuffer;
+        
+        if (vmaCreateBuffer(allocator, reinterpret_cast<VkBufferCreateInfo*>(&bufferInfo), &allocInfo, 
+                           reinterpret_cast<VkBuffer*>(&mesh.indexBuffer), &mesh.indexBufferAllocation, nullptr) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create index buffer for mesh");
+        }
+        
+        vmaMapMemory(allocator, mesh.indexBufferAllocation, &data);
+        memcpy(data, mesh.indices.data(), static_cast<size_t>(indexBufferSize));
+        vmaUnmapMemory(allocator, mesh.indexBufferAllocation);
+    }
+    
     vk::ShaderModule createShaderModule(const std::vector<uint32_t>& code) {
         auto createInfo = vk::ShaderModuleCreateInfo();
         createInfo.codeSize = code.size() * sizeof(uint32_t);
@@ -1033,10 +2086,17 @@ private:
         
         std::array<vk::PipelineShaderStageCreateInfo, 2> shaderStages = {vertShaderStageInfo, fragShaderStageInfo};
         
-        // Create pipeline layout
+        // Create pipeline layout with push constants for material data
+        vk::PushConstantRange pushConstantRange;
+        pushConstantRange.stageFlags = vk::ShaderStageFlagBits::eFragment;
+        pushConstantRange.offset = 0;
+        pushConstantRange.size = sizeof(PBRMaterial);
+        
         auto pipelineLayoutInfo = vk::PipelineLayoutCreateInfo();
         pipelineLayoutInfo.setLayoutCount = 1;
         pipelineLayoutInfo.pSetLayouts = &descriptorSetLayout;
+        pipelineLayoutInfo.pushConstantRangeCount = 1;
+        pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
         
         auto result = device.createPipelineLayout(&pipelineLayoutInfo, nullptr, &pipelineLayout);
         if (result != vk::Result::eSuccess) {
@@ -1108,6 +2168,13 @@ private:
         colorBlending.blendConstants[2] = 0.0f;
         colorBlending.blendConstants[3] = 0.0f;
         
+        auto depthStencil = vk::PipelineDepthStencilStateCreateInfo();
+        depthStencil.depthTestEnable = VK_TRUE;
+        depthStencil.depthWriteEnable = VK_TRUE;
+        depthStencil.depthCompareOp = vk::CompareOp::eLess;
+        depthStencil.depthBoundsTestEnable = VK_FALSE;
+        depthStencil.stencilTestEnable = VK_FALSE;
+        
         auto pipelineInfo = vk::GraphicsPipelineCreateInfo();
         pipelineInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
         pipelineInfo.pStages = shaderStages.data();
@@ -1116,6 +2183,7 @@ private:
         pipelineInfo.pViewportState = &viewportState;
         pipelineInfo.pRasterizationState = &rasterizer;
         pipelineInfo.pMultisampleState = &multisampling;
+        pipelineInfo.pDepthStencilState = &depthStencil;
         pipelineInfo.pColorBlendState = &colorBlending;
         pipelineInfo.layout = pipelineLayout;
         pipelineInfo.renderPass = renderPass;
@@ -1144,8 +2212,9 @@ private:
         swapChainFramebuffers.resize(swapChainImageViews.size());
         
         for (size_t i = 0; i < swapChainImageViews.size(); i++) {
-            std::array<vk::ImageView, 1> attachments = {
-                swapChainImageViews[i]
+            std::array<vk::ImageView, 2> attachments = {
+                swapChainImageViews[i],
+                depthImageView
             };
             
             auto framebufferInfo = vk::FramebufferCreateInfo();
@@ -1339,9 +2408,11 @@ private:
     }
     
     bool createDescriptorPool() {
-        std::array<vk::DescriptorPoolSize, 1> poolSizes{};
+        std::array<vk::DescriptorPoolSize, 2> poolSizes{};
         poolSizes[0].type = vk::DescriptorType::eUniformBuffer;
-        poolSizes[0].descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT * 3);
+        poolSizes[0].descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT * 2); // Camera and Light only
+        poolSizes[1].type = vk::DescriptorType::eCombinedImageSampler;
+        poolSizes[1].descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT * 3);
         
         auto poolInfo = vk::DescriptorPoolCreateInfo();
         poolInfo.maxSets = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
@@ -1382,12 +2453,22 @@ private:
             lightBufferInfo.offset = 0;
             lightBufferInfo.range = sizeof(LightUBO);
             
-            auto materialBufferInfo = vk::DescriptorBufferInfo();
-            materialBufferInfo.buffer = materialUniformBuffers[i];
-            materialBufferInfo.offset = 0;
-            materialBufferInfo.range = sizeof(PBRMaterial);
+            auto albedoImageInfo = vk::DescriptorImageInfo();
+            albedoImageInfo.imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
+            albedoImageInfo.imageView = defaultAlbedoTexture.imageView;
+            albedoImageInfo.sampler = defaultAlbedoTexture.sampler;
             
-            std::array<vk::WriteDescriptorSet, 3> descriptorWrites{};
+            auto normalImageInfo = vk::DescriptorImageInfo();
+            normalImageInfo.imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
+            normalImageInfo.imageView = defaultNormalTexture.imageView;
+            normalImageInfo.sampler = defaultNormalTexture.sampler;
+            
+            auto metallicRoughnessImageInfo = vk::DescriptorImageInfo();
+            metallicRoughnessImageInfo.imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
+            metallicRoughnessImageInfo.imageView = defaultMetallicRoughnessTexture.imageView;
+            metallicRoughnessImageInfo.sampler = defaultMetallicRoughnessTexture.sampler;
+            
+            std::array<vk::WriteDescriptorSet, 5> descriptorWrites{};
             
             descriptorWrites[0].dstSet = descriptorSets[i];
             descriptorWrites[0].dstBinding = 0;
@@ -1407,8 +2488,22 @@ private:
             descriptorWrites[2].dstBinding = 2;
             descriptorWrites[2].dstArrayElement = 0;
             descriptorWrites[2].descriptorCount = 1;
-            descriptorWrites[2].descriptorType = vk::DescriptorType::eUniformBuffer;
-            descriptorWrites[2].pBufferInfo = &materialBufferInfo;
+            descriptorWrites[2].descriptorType = vk::DescriptorType::eCombinedImageSampler;
+            descriptorWrites[2].pImageInfo = &albedoImageInfo;
+            
+            descriptorWrites[3].dstSet = descriptorSets[i];
+            descriptorWrites[3].dstBinding = 3;
+            descriptorWrites[3].dstArrayElement = 0;
+            descriptorWrites[3].descriptorCount = 1;
+            descriptorWrites[3].descriptorType = vk::DescriptorType::eCombinedImageSampler;
+            descriptorWrites[3].pImageInfo = &normalImageInfo;
+            
+            descriptorWrites[4].dstSet = descriptorSets[i];
+            descriptorWrites[4].dstBinding = 4;
+            descriptorWrites[4].dstArrayElement = 0;
+            descriptorWrites[4].descriptorCount = 1;
+            descriptorWrites[4].descriptorType = vk::DescriptorType::eCombinedImageSampler;
+            descriptorWrites[4].pImageInfo = &metallicRoughnessImageInfo;
             
             device.updateDescriptorSets(static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
         }
@@ -1464,27 +2559,35 @@ private:
         
         // Update camera
         CameraUBO cameraUbo{};
-        cameraUbo.view = glm::lookAt(glm::vec3(/*sinf(time)*4.0f, 0.0f, cosf(time)*4.0f*/0.0f,-0.0f,-5.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+        cameraUbo.view = camera.getViewMatrix();
         cameraUbo.invView = glm::inverse(cameraUbo.view);
-        cameraUbo.proj = glm::perspective(glm::radians(45.0f), swapChainExtent.width / (float) swapChainExtent.height, 0.1f, 1000.0f);
+        cameraUbo.proj = glm::perspective(glm::radians(camera.zoom), swapChainExtent.width / (float) swapChainExtent.height, 0.1f, 10000.0f);
         cameraUbo.proj[1][1] *= -1; // Flip Y for Vulkan
-        cameraUbo.viewPos = cameraUbo.view[3];
+        cameraUbo.viewPos = camera.position;
         
         void* data;
         vmaMapMemory(allocator, cameraUniformBufferAllocations[currentImage], &data);
         memcpy(data, &cameraUbo, sizeof(cameraUbo));
         vmaUnmapMemory(allocator, cameraUniformBufferAllocations[currentImage]);
         
-        // Update lights
+        // Update lights - transform to view space
         LightUBO lightUbo{};
-        lightUbo.lightPositions[0] = glm::vec4(sinf(time)*5.0f, 0.0f, cosf(time)*5.0f,0.0f);
-        lightUbo.lightPositions[1] = glm::vec4(sinf(2.0944f+time)*5.0f, 0.0f, cosf(2.0944f+time)*5.0f, 0.0f);
-        lightUbo.lightPositions[2] = glm::vec4(sinf(4.1888f+time)*5.0f, 0.0f, cosf(4.1888f+time)*5.0f,0.0f);
-        lightUbo.lightPositions[3] = glm::vec4(sinf(time)*5.0f, -10.0f, cosf(time)*5.0f,0.0f);
+        glm::vec4 worldLightPos[4] = {
+            glm::vec4(sinf(time)*5.0f, 0.0f, cosf(time)*5.0f, 1.0f),
+            glm::vec4(sinf(2.0944f+time)*5.0f, 0.0f, cosf(2.0944f+time)*5.0f, 1.0f),
+            glm::vec4(sinf(4.1888f+time)*5.0f, 0.0f, cosf(4.1888f+time)*5.0f, 1.0f),
+            glm::vec4(camera.position.x, camera.position.y, camera.position.z, 1.0f)
+        };
         
-        lightUbo.lightColors[0] = glm::vec4(30.0f, 0.0f, 0.0f,0.0f);   // CYAN
-        lightUbo.lightColors[1] = glm::vec4(0.0f, 30.0f, 0.0f,0.0f);   // MAGENTA
-        lightUbo.lightColors[2] = glm::vec4(0.0f, 0.0f, 30.0f,0.0f);   // YELLOW
+        // Transform light positions to view space
+        for(int i = 0; i < 4; ++i) {
+            glm::vec4 viewSpacePos = cameraUbo.view * worldLightPos[i];
+            lightUbo.lightPositions[i] = glm::vec4((glm::vec3)viewSpacePos, 0.0f);
+        }
+        
+        lightUbo.lightColors[0] = glm::vec4(3.0f, 0.0f, 0.0f,0.0f);   // CYAN
+        lightUbo.lightColors[1] = glm::vec4(0.0f, 3.0f, 0.0f,0.0f);   // MAGENTA
+        lightUbo.lightColors[2] = glm::vec4(0.0f, 0.0f, 3.0f,0.0f);   // YELLOW
         lightUbo.lightColors[3] = glm::vec4(0.0f, 0.0f, 0.0f,0.0f); // WHITE
         
         vmaMapMemory(allocator, lightUniformBufferAllocations[currentImage], &data);
@@ -1494,8 +2597,8 @@ private:
         // Update material
         PBRMaterial material{};
         material.albedo = glm::vec3(1.0f, 1.0f, 1.0f);
-        material.metallic = 0.0f;
-        material.roughness = 0.5f + (sinf(time/8.0f) / 2.0f);
+        material.metallic = 1.0f;
+        material.roughness = 0.1f;
         material.ao = 0.5f;
         
         vmaMapMemory(allocator, materialUniformBufferAllocations[currentImage], &data);
@@ -1511,8 +2614,9 @@ private:
             throw std::runtime_error("Failed to begin recording command buffer!");
         }
         
-        auto clearColor = vk::ClearValue();
-        clearColor.color = vk::ClearColorValue{std::array<float, 4>{{0.0f, 0.0f, 0.0f, 1.0f}}};
+        std::array<vk::ClearValue, 2> clearValues{};
+        clearValues[0].color = vk::ClearColorValue{std::array<float, 4>{{0.0f, 0.0f, 0.0f, 1.0f}}};
+        clearValues[1].depthStencil = vk::ClearDepthStencilValue{1.0f, 0};
         
         auto renderPassInfo = vk::RenderPassBeginInfo();
         renderPassInfo.renderPass = renderPass;
@@ -1520,21 +2624,45 @@ private:
         renderPassInfo.renderArea.offset.x = 0;
         renderPassInfo.renderArea.offset.y = 0;
         renderPassInfo.renderArea.extent = swapChainExtent;
-        renderPassInfo.clearValueCount = 1;
-        renderPassInfo.pClearValues = &clearColor;
+        renderPassInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());
+        renderPassInfo.pClearValues = clearValues.data();
         
         commandBuffer.beginRenderPass(&renderPassInfo, vk::SubpassContents::eInline);
         
         commandBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, graphicsPipeline);
         
-        std::array<vk::Buffer, 1> vertexBuffers = {vertexBuffer};
-        std::array<vk::DeviceSize, 1> offsets = {0};
-        commandBuffer.bindVertexBuffers(0, 1, vertexBuffers.data(), offsets.data());
-        commandBuffer.bindIndexBuffer(indexBuffer, 0, vk::IndexType::eUint32);
-        
-        commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipelineLayout, 0, 1, &descriptorSets[currentFrame], 0, nullptr);
-        
-        commandBuffer.drawIndexed(static_cast<uint32_t>(indices.size()), 1, 0, 0, 0);
+        if (useModel && !loadedModel.meshes.empty()) {
+            // Render all meshes in the loaded model
+            for (size_t meshIdx = 0; meshIdx < loadedModel.meshes.size(); meshIdx++) {
+                const auto& mesh = loadedModel.meshes[meshIdx];
+                
+                // Update descriptor set for this mesh's material BEFORE binding
+                updateMaterialDescriptors(currentFrame, mesh.materialIndex);
+                
+                // Push material constants
+                PBRMaterial materialProps = getMaterialProperties(mesh.materialIndex);
+                commandBuffer.pushConstants(pipelineLayout, vk::ShaderStageFlagBits::eFragment, 0, sizeof(PBRMaterial), &materialProps);
+                
+                std::array<vk::Buffer, 1> vertexBuffers = {mesh.vertexBuffer};
+                std::array<vk::DeviceSize, 1> offsets = {0};
+                commandBuffer.bindVertexBuffers(0, 1, vertexBuffers.data(), offsets.data());
+                commandBuffer.bindIndexBuffer(mesh.indexBuffer, 0, vk::IndexType::eUint32);
+                
+                commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipelineLayout, 0, 1, &descriptorSets[currentFrame], 0, nullptr);
+                
+                commandBuffer.drawIndexed(static_cast<uint32_t>(mesh.indices.size()), 1, 0, 0, 0);
+            }
+        } else {
+            // Render the default sphere
+            std::array<vk::Buffer, 1> vertexBuffers = {vertexBuffer};
+            std::array<vk::DeviceSize, 1> offsets = {0};
+            commandBuffer.bindVertexBuffers(0, 1, vertexBuffers.data(), offsets.data());
+            commandBuffer.bindIndexBuffer(indexBuffer, 0, vk::IndexType::eUint32);
+            
+            commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipelineLayout, 0, 1, &descriptorSets[currentFrame], 0, nullptr);
+            
+            commandBuffer.drawIndexed(static_cast<uint32_t>(indices.size()), 1, 0, 0, 0);
+        }
         
         commandBuffer.endRenderPass();
         

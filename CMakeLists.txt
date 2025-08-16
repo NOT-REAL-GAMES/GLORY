@@ -20,19 +20,35 @@ set(CMAKE_POLICY_DEFAULT_CMP0091 NEW)
 find_package(Vulkan REQUIRED)
 
 include(FetchContent)
-FetchContent_Declare(
-    JoltPhysics STATIC
-    GIT_REPOSITORY "https://github.com/jrouwe/JoltPhysics.git"
-    GIT_TAG "v5.3.0"  # Try latest version
-    SOURCE_SUBDIR "Build"
-)
-FetchContent_MakeAvailable(JoltPhysics)
+# Temporarily commented out to avoid build hangs - can re-enable after Sponza works
+# FetchContent_Declare(
+#     JoltPhysics STATIC
+#     GIT_REPOSITORY "https://github.com/jrouwe/JoltPhysics.git"
+#     GIT_TAG "v5.3.0"  # Try latest version
+#     SOURCE_SUBDIR "Build"
+#     GIT_SHALLOW TRUE
+# )
+# 
+# # Optimize Jolt build
+# set(TARGET_UNIT_TESTS OFF CACHE BOOL "" FORCE)
+# set(TARGET_HELLO_WORLD OFF CACHE BOOL "" FORCE)
+# set(TARGET_PERFORMANCE_TEST OFF CACHE BOOL "" FORCE)
+# set(TARGET_SAMPLES OFF CACHE BOOL "" FORCE)
+# set(TARGET_VIEWER OFF CACHE BOOL "" FORCE)
+# 
+# FetchContent_MakeAvailable(JoltPhysics)
 
 FetchContent_Declare(
     SDL3 STATIC
     GIT_REPOSITORY "https://github.com/libsdl-org/SDL.git"
     GIT_TAG "main"
+    GIT_SHALLOW TRUE
 )
+
+# Optimize SDL3 build 
+set(SDL_TESTS OFF CACHE BOOL "" FORCE)
+set(SDL_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(SDL_INSTALL OFF CACHE BOOL "" FORCE)
 
 FetchContent_MakeAvailable(SDL3)
 
@@ -83,13 +99,25 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(glslang)
 
-FetchContent_Declare(
-    flecs STATIC
-    GIT_REPOSITORY "https://github.com/SanderMertens/flecs.git"
-    GIT_TAG "v4.1.0"  # Try latest version
-)
-
-FetchContent_MakeAvailable(flecs)
+# Temporarily commented out to avoid build hangs - can re-enable after Sponza works  
+# FetchContent_Declare(
+#     flecs STATIC
+#     GIT_REPOSITORY "https://github.com/SanderMertens/flecs.git"
+#     GIT_TAG "v4.1.0"
+#     GIT_SHALLOW TRUE
+# )
+# 
+# # Optimize flecs build - be more aggressive
+# set(FLECS_STATIC ON CACHE BOOL "" FORCE)
+# set(FLECS_SHARED OFF CACHE BOOL "" FORCE)
+# set(FLECS_PIC OFF CACHE BOOL "" FORCE)
+# set(FLECS_TESTS OFF CACHE BOOL "" FORCE)
+# set(FLECS_EXAMPLES OFF CACHE BOOL "" FORCE)
+# set(FLECS_APPS OFF CACHE BOOL "" FORCE)
+# set(FLECS_SOFT_ASSERT OFF CACHE BOOL "" FORCE)
+# set(FLECS_CPP_NO_AUTO_REGISTRATION ON CACHE BOOL "" FORCE)
+# 
+# FetchContent_MakeAvailable(flecs)
 
 FetchContent_Declare(
     VulkanMemoryAllocator STATIC
@@ -107,6 +135,38 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(tinyexr)
 
+FetchContent_Declare(
+    assimp STATIC
+    GIT_REPOSITORY "https://github.com/assimp/assimp.git"
+    GIT_TAG "v5.4.3"
+    GIT_SHALLOW TRUE
+)
+
+# Disable most Assimp features to speed up build and avoid hangs
+set(ASSIMP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(ASSIMP_INSTALL OFF CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_ASSIMP_TOOLS OFF CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_SAMPLES OFF CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_ALL_EXPORTERS_BY_DEFAULT OFF CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_ALL_IMPORTERS_BY_DEFAULT OFF CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_GLTF_IMPORTER ON CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_OBJ_IMPORTER ON CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_FBX_IMPORTER ON CACHE BOOL "" FORCE)
+set(ASSIMP_NO_EXPORT ON CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_ZLIB OFF CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_ASSIMP_VIEW OFF CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_MINIZIP OFF CACHE BOOL "" FORCE)
+
+FetchContent_MakeAvailable(assimp)
+
+FetchContent_Declare(
+    stb STATIC
+    GIT_REPOSITORY "https://github.com/nothings/stb.git"
+    GIT_TAG "master"
+)
+
+FetchContent_MakeAvailable(stb)
+
 
 
 add_executable(GLORY
@@ -118,15 +178,18 @@ target_link_libraries(GLORY PUBLIC
     SDL3::SDL3 
     Vulkan::Vulkan 
     volk::volk
-    Jolt::Jolt 
+    # Jolt::Jolt  # Commented out temporarily
     VulkanMemoryAllocator 
-    flecs 
+    # flecs       # Commented out temporarily
     glm::glm 
     glslang::glslang
     SPIRV-Tools
     SPIRV-Headers
     tinyexr
+    assimp
     )
+
+target_include_directories(GLORY PRIVATE ${stb_SOURCE_DIR})
 
 if(MSVC)
     target_link_options(GLORY PRIVATE "/STACK:8388608")  # 8MB stack instead of default 1MB
