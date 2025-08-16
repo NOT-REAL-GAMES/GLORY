@@ -36,8 +36,60 @@ VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 #include <chrono>
 #include <algorithm>
 #include <cmath>
+#include <sys/stat.h>
+#include <unistd.h>
 
 vk::detail::DispatchLoaderDynamic dl;
+
+// Cross-platform file utilities
+class FileUtils {
+public:
+    static bool fileExists(const std::string& path) {
+        struct stat buffer;
+        return (stat(path.c_str(), &buffer) == 0);
+    }
+    
+    static std::string getCurrentWorkingDirectory() {
+        char cwd[1024];
+        if (getcwd(cwd, sizeof(cwd)) != nullptr) {
+            return std::string(cwd);
+        }
+        return "";
+    }
+    
+    static std::string normalizePath(const std::string& path) {
+        std::string normalized = path;
+        // Convert any backslashes to forward slashes for consistency
+        std::replace(normalized.begin(), normalized.end(), '\\', '/');
+        return normalized;
+    }
+    
+    static std::string joinPaths(const std::string& dir, const std::string& file) {
+        std::string result = normalizePath(dir);
+        std::string filename = normalizePath(file);
+        
+        // Remove trailing slash from directory if present
+        if (!result.empty() && result.back() == '/') {
+            result.pop_back();
+        }
+        
+        // Remove leading slash from filename if present
+        if (!filename.empty() && filename.front() == '/') {
+            filename = filename.substr(1);
+        }
+        
+        return result + "/" + filename;
+    }
+    
+    static std::string getDirectory(const std::string& path) {
+        std::string normalized = normalizePath(path);
+        size_t pos = normalized.find_last_of('/');
+        if (pos == std::string::npos) {
+            return "."; // Current directory if no path separator found
+        }
+        return normalized.substr(0, pos);
+    }
+};
 
 // Vertex structure for PBR rendering
 struct Vertex {
@@ -614,10 +666,11 @@ public:
     }
     
     void loadSponzaIfAvailable() {
-        std::string sponzaPath = "assets/models/sponza/Sponza.gltf";
-        std::ifstream file(sponzaPath);
-        if (file.good()) {
-            file.close();
+        std::cout << "Current working directory: " << FileUtils::getCurrentWorkingDirectory() << std::endl;
+        std::string sponzaPath = FileUtils::normalizePath("assets/models/sponza/Sponza.gltf");
+        std::cout << "Looking for Sponza model at: " << sponzaPath << std::endl;
+        
+        if (FileUtils::fileExists(sponzaPath)) {
             try {
                 std::cout << "Loading Sponza model..." << std::endl;
                 loadedModel = loadModel(sponzaPath);
@@ -1815,7 +1868,7 @@ private:
         }
         
         Model model;
-        model.directory = path.substr(0, path.find_last_of('/'));
+        model.directory = FileUtils::getDirectory(path);
         
         // Load materials
         loadMaterials(scene, model);
@@ -1897,7 +1950,7 @@ private:
         for (unsigned int i = 0; i < mat->GetTextureCount(type); i++) {
             aiString str;
             mat->GetTexture(type, i, &str);
-            std::string texturePath = directory + "/" + str.C_Str();
+            std::string texturePath = FileUtils::joinPaths(directory, str.C_Str());
             
             // Check if texture already loaded
             bool skip = false;
@@ -1907,15 +1960,21 @@ private:
             }
             
             if (!skip) {
-                try {
-                    std::cout << "Loading texture: " << texturePath << std::endl;
-                    Texture texture = loadTexture(texturePath);
-                    loadedTextures.push_back(texture);
-                    textureIndex = static_cast<int>(loadedTextures.size() - 1);
-                    std::cout << "Successfully loaded texture " << texturePath << " at index " << textureIndex << std::endl;
-                } catch (const std::exception& e) {
-                    std::cerr << "Warning: Failed to load texture " << texturePath << ": " << e.what() << std::endl;
+                // Check if file exists before attempting to load
+                if (!FileUtils::fileExists(texturePath)) {
+                    std::cerr << "Warning: Texture file not found: " << texturePath << std::endl;
                     textureIndex = -1;
+                } else {
+                    try {
+                        std::cout << "Loading texture: " << texturePath << std::endl;
+                        Texture texture = loadTexture(texturePath);
+                        loadedTextures.push_back(texture);
+                        textureIndex = static_cast<int>(loadedTextures.size() - 1);
+                        std::cout << "Successfully loaded texture " << texturePath << " at index " << textureIndex << std::endl;
+                    } catch (const std::exception& e) {
+                        std::cerr << "Warning: Failed to load texture " << texturePath << ": " << e.what() << std::endl;
+                        textureIndex = -1;
+                    }
                 }
             }
         }
