@@ -1517,6 +1517,38 @@ private:
         throw std::runtime_error("Failed to find supported texture format!");
     }
     
+    vk::Sampler createCompatibleSampler(uint32_t mipLevels) {
+        auto samplerInfo = vk::SamplerCreateInfo();
+        samplerInfo.magFilter = vk::Filter::eLinear;
+        samplerInfo.minFilter = vk::Filter::eLinear;
+        samplerInfo.addressModeU = vk::SamplerAddressMode::eRepeat;
+        samplerInfo.addressModeV = vk::SamplerAddressMode::eRepeat;
+        samplerInfo.addressModeW = vk::SamplerAddressMode::eRepeat;
+        
+        // Check if anisotropic filtering is supported
+        auto deviceFeatures = physicalDevice.getFeatures();
+        if (deviceFeatures.samplerAnisotropy) {
+            samplerInfo.anisotropyEnable = VK_TRUE;
+            auto properties = physicalDevice.getProperties();
+            // Clamp to reasonable values for Mac compatibility
+            samplerInfo.maxAnisotropy = std::min(properties.limits.maxSamplerAnisotropy, 4.0f);
+        } else {
+            samplerInfo.anisotropyEnable = VK_FALSE;
+            samplerInfo.maxAnisotropy = 1.0f;
+        }
+        
+        samplerInfo.borderColor = vk::BorderColor::eIntOpaqueBlack;
+        samplerInfo.unnormalizedCoordinates = VK_FALSE;
+        samplerInfo.compareEnable = VK_FALSE;
+        samplerInfo.compareOp = vk::CompareOp::eAlways;
+        samplerInfo.mipmapMode = vk::SamplerMipmapMode::eLinear;
+        samplerInfo.mipLodBias = 0.0f; // No LOD bias for Mac compatibility
+        samplerInfo.minLod = 0.0f;
+        samplerInfo.maxLod = static_cast<float>(mipLevels);
+        
+        return device.createSampler(samplerInfo).value;
+    }
+    
     void createImage(uint32_t width, uint32_t height, uint32_t mipLevels, vk::Format format, 
                      vk::ImageTiling tiling, vk::ImageUsageFlags usage, vk::Image& image, VmaAllocation& allocation) {
         auto imageInfo = vk::ImageCreateInfo();
@@ -1658,6 +1690,8 @@ private:
             swizzleRGBAToBGRA(pixels, texWidth, texHeight);
         }
         
+        std::cout << "Loading texture " << path << " (" << texWidth << "x" << texHeight << ", " << texChannels << " channels)" << std::endl;
+        
         uint32_t mipLevels = static_cast<uint32_t>(std::floor(std::log2(std::max(texWidth, texHeight)))) + 1;
         
         // Create staging buffer
@@ -1700,27 +1734,8 @@ private:
         
         texture.imageView = createImageView(texture.image, textureFormat, vk::ImageAspectFlagBits::eColor, mipLevels);
         
-        // Create sampler
-        auto samplerInfo = vk::SamplerCreateInfo();
-        samplerInfo.magFilter = vk::Filter::eLinear;
-        samplerInfo.minFilter = vk::Filter::eLinear;
-        samplerInfo.addressModeU = vk::SamplerAddressMode::eRepeat;
-        samplerInfo.addressModeV = vk::SamplerAddressMode::eRepeat;
-        samplerInfo.addressModeW = vk::SamplerAddressMode::eRepeat;
-        samplerInfo.anisotropyEnable = VK_TRUE;
-        
-        auto properties = physicalDevice.getProperties();
-        samplerInfo.maxAnisotropy = properties.limits.maxSamplerAnisotropy;
-        samplerInfo.borderColor = vk::BorderColor::eIntOpaqueBlack;
-        samplerInfo.unnormalizedCoordinates = VK_FALSE;
-        samplerInfo.compareEnable = VK_FALSE;
-        samplerInfo.compareOp = vk::CompareOp::eAlways;
-        samplerInfo.mipmapMode = vk::SamplerMipmapMode::eLinear;
-        samplerInfo.mipLodBias = -0.5f; // Slight bias toward higher mip levels to reduce aliasing
-        samplerInfo.minLod = 0.0f;
-        samplerInfo.maxLod = static_cast<float>(mipLevels);
-        
-        texture.sampler = device.createSampler(samplerInfo).value;
+        // Create compatible sampler
+        texture.sampler = createCompatibleSampler(mipLevels);
         
         return texture;
     }
@@ -1863,24 +1878,8 @@ private:
         
         texture.imageView = createImageView(texture.image, textureFormat, vk::ImageAspectFlagBits::eColor, 1);
         
-        // Create sampler
-        auto samplerInfo = vk::SamplerCreateInfo();
-        samplerInfo.magFilter = vk::Filter::eLinear;
-        samplerInfo.minFilter = vk::Filter::eLinear;
-        samplerInfo.addressModeU = vk::SamplerAddressMode::eRepeat;
-        samplerInfo.addressModeV = vk::SamplerAddressMode::eRepeat;
-        samplerInfo.addressModeW = vk::SamplerAddressMode::eRepeat;
-        samplerInfo.anisotropyEnable = VK_FALSE;
-        samplerInfo.borderColor = vk::BorderColor::eIntOpaqueBlack;
-        samplerInfo.unnormalizedCoordinates = VK_FALSE;
-        samplerInfo.compareEnable = VK_FALSE;
-        samplerInfo.compareOp = vk::CompareOp::eAlways;
-        samplerInfo.mipmapMode = vk::SamplerMipmapMode::eLinear;
-        samplerInfo.mipLodBias = 0.0f;
-        samplerInfo.minLod = 0.0f;
-        samplerInfo.maxLod = 0.0f;
-        
-        texture.sampler = device.createSampler(samplerInfo).value;
+        // Create compatible sampler
+        texture.sampler = createCompatibleSampler(1);
         
         return texture;
     }
