@@ -342,6 +342,7 @@ private:
     std::vector<vk::ImageView> swapChainImageViews;
     vk::Format swapChainImageFormat;
     vk::Extent2D swapChainExtent;
+    vk::Format textureFormat;
     
     vk::RenderPass renderPass;
     vk::DescriptorSetLayout descriptorSetLayout;
@@ -971,6 +972,9 @@ private:
             return false;
         }
         
+        // Initialize texture format after device creation
+        textureFormat = findSupportedTextureFormat();
+        
         return true;
         } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;
@@ -1480,6 +1484,39 @@ private:
         throw std::runtime_error("Failed to find suitable memory type!");
     }
     
+    bool needsChannelSwizzle(vk::Format format) {
+        return format == vk::Format::eB8G8R8A8Srgb || format == vk::Format::eB8G8R8A8Unorm;
+    }
+    
+    void swizzleRGBAToBGRA(unsigned char* pixels, int width, int height) {
+        for (int i = 0; i < width * height * 4; i += 4) {
+            std::swap(pixels[i], pixels[i + 2]); // Swap R and B channels
+        }
+    }
+    
+    vk::Format findSupportedTextureFormat() {
+        std::vector<vk::Format> candidates = {
+            vk::Format::eR8G8B8A8Srgb,    // Preferred sRGB format
+            vk::Format::eR8G8B8A8Unorm,   // Linear format fallback
+            vk::Format::eB8G8R8A8Srgb,    // Alternative sRGB (common on Mac)
+            vk::Format::eB8G8R8A8Unorm    // Alternative linear
+        };
+        
+        for (vk::Format format : candidates) {
+            auto props = physicalDevice.getFormatProperties(format);
+            vk::FormatFeatureFlags required = vk::FormatFeatureFlagBits::eSampledImage | 
+                                              vk::FormatFeatureFlagBits::eTransferDst |
+                                              vk::FormatFeatureFlagBits::eTransferSrc;
+            
+            if ((props.optimalTilingFeatures & required) == required) {
+                std::cout << "Selected texture format: " << vk::to_string(format) << std::endl;
+                return format;
+            }
+        }
+        
+        throw std::runtime_error("Failed to find supported texture format!");
+    }
+    
     void createImage(uint32_t width, uint32_t height, uint32_t mipLevels, vk::Format format, 
                      vk::ImageTiling tiling, vk::ImageUsageFlags usage, vk::Image& image, VmaAllocation& allocation) {
         auto imageInfo = vk::ImageCreateInfo();
@@ -1615,6 +1652,12 @@ private:
             throw std::runtime_error("Failed to load texture image: " + path);
         }
         
+        // Handle channel swizzling for BGR formats
+        if (needsChannelSwizzle(textureFormat)) {
+            std::cout << "Swizzling texture channels for BGR format: " << path << std::endl;
+            swizzleRGBAToBGRA(pixels, texWidth, texHeight);
+        }
+        
         uint32_t mipLevels = static_cast<uint32_t>(std::floor(std::log2(std::max(texWidth, texHeight)))) + 1;
         
         // Create staging buffer
@@ -1644,18 +1687,18 @@ private:
         texture.height = texHeight;
         texture.mipLevels = mipLevels;
         
-        createImage(texWidth, texHeight, mipLevels, vk::Format::eR8G8B8A8Srgb, vk::ImageTiling::eOptimal,
+        createImage(texWidth, texHeight, mipLevels, textureFormat, vk::ImageTiling::eOptimal,
                    vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferSrc,
                    texture.image, texture.allocation);
         
-        transitionImageLayout(texture.image, vk::Format::eR8G8B8A8Srgb, vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal, mipLevels);
+        transitionImageLayout(texture.image, textureFormat, vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal, mipLevels);
         copyBufferToImage(stagingBuffer, texture.image, static_cast<uint32_t>(texWidth), static_cast<uint32_t>(texHeight));
         
         vmaDestroyBuffer(allocator, stagingBuffer, stagingAllocation);
         
-        generateMipmaps(texture.image, vk::Format::eR8G8B8A8Srgb, texWidth, texHeight, mipLevels);
+        generateMipmaps(texture.image, textureFormat, texWidth, texHeight, mipLevels);
         
-        texture.imageView = createImageView(texture.image, vk::Format::eR8G8B8A8Srgb, vk::ImageAspectFlagBits::eColor, mipLevels);
+        texture.imageView = createImageView(texture.image, textureFormat, vk::ImageAspectFlagBits::eColor, mipLevels);
         
         // Create sampler
         auto samplerInfo = vk::SamplerCreateInfo();
@@ -1683,6 +1726,16 @@ private:
     }
     
     void generateMipmaps(vk::Image image, vk::Format imageFormat, int32_t texWidth, int32_t texHeight, uint32_t mipLevels) {
+        // Check if image format supports linear blitting
+        auto formatProperties = physicalDevice.getFormatProperties(imageFormat);
+        if (!(formatProperties.optimalTilingFeatures & vk::FormatFeatureFlagBits::eSampledImageFilterLinear)) {
+            std::cout << "Warning: Linear blitting not supported for format " << vk::to_string(imageFormat) 
+                      << ", skipping mipmap generation" << std::endl;
+            // Transition to shader read only layout for level 0
+            transitionImageLayout(image, imageFormat, vk::ImageLayout::eTransferDstOptimal, 
+                                vk::ImageLayout::eShaderReadOnlyOptimal, 1);
+            return;
+        }
         auto commandBuffer = beginSingleTimeCommands();
         
         auto barrier = vk::ImageMemoryBarrier();
@@ -1755,6 +1808,14 @@ private:
         uint8_t normalPixel[4] = {128, 128, 255, 255}; // Default normal (0, 0, 1) in tangent space
         uint8_t metallicRoughnessPixel[4] = {0, 128, 0, 255}; // No metallic, 0.5 roughness
         
+        // Handle channel swizzling for BGR formats
+        if (needsChannelSwizzle(textureFormat)) {
+            std::cout << "Swizzling default texture channels for BGR format" << std::endl;
+            std::swap(whitePixel[0], whitePixel[2]);
+            std::swap(normalPixel[0], normalPixel[2]);
+            std::swap(metallicRoughnessPixel[0], metallicRoughnessPixel[2]);
+        }
+        
         defaultAlbedoTexture = createDefaultTexture(whitePixel);
         defaultNormalTexture = createDefaultTexture(normalPixel);
         defaultMetallicRoughnessTexture = createDefaultTexture(metallicRoughnessPixel);
@@ -1790,17 +1851,17 @@ private:
         texture.height = 1;
         texture.mipLevels = 1;
         
-        createImage(1, 1, 1, vk::Format::eR8G8B8A8Srgb, vk::ImageTiling::eOptimal,
+        createImage(1, 1, 1, textureFormat, vk::ImageTiling::eOptimal,
                    vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled,
                    texture.image, texture.allocation);
         
-        transitionImageLayout(texture.image, vk::Format::eR8G8B8A8Srgb, vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal, 1);
+        transitionImageLayout(texture.image, textureFormat, vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal, 1);
         copyBufferToImage(stagingBuffer, texture.image, 1, 1);
-        transitionImageLayout(texture.image, vk::Format::eR8G8B8A8Srgb, vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eShaderReadOnlyOptimal, 1);
+        transitionImageLayout(texture.image, textureFormat, vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eShaderReadOnlyOptimal, 1);
         
         vmaDestroyBuffer(allocator, stagingBuffer, stagingAllocation);
         
-        texture.imageView = createImageView(texture.image, vk::Format::eR8G8B8A8Srgb, vk::ImageAspectFlagBits::eColor, 1);
+        texture.imageView = createImageView(texture.image, textureFormat, vk::ImageAspectFlagBits::eColor, 1);
         
         // Create sampler
         auto samplerInfo = vk::SamplerCreateInfo();
