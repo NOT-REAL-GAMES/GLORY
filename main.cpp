@@ -37,11 +37,11 @@ VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 #include <algorithm>
 #include <cmath>
 #include <sys/stat.h>
-#include <unistd.h>
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
 #include <libgen.h>
 #elif defined(__linux__)
+#include <unistd.h>
 #include <linux/limits.h>
 #include <libgen.h>
 #elif defined(_WIN32)
@@ -86,9 +86,9 @@ public:
 #endif
         // Fallback to current working directory
         char cwd[1024];
-        if (getcwd(cwd, sizeof(cwd)) != nullptr) {
-            return std::string(cwd);
-        }
+        //if (getcwd(cwd, sizeof(cwd)) != nullptr) {
+        //    return std::string(cwd);
+        //}
         return "";
     }
     
@@ -1907,20 +1907,30 @@ private:
         std::cout << "Loading model from absolute path: " << absolutePath << std::endl;
         
         Assimp::Importer importer;
-        const aiScene* scene = importer.ReadFile(absolutePath, 
+        const aiScene* scene = importer.ReadFile(path, 
             aiProcess_Triangulate | 
             aiProcess_FlipUVs | 
             aiProcess_CalcTangentSpace |
             aiProcess_GenNormals |
             aiProcess_JoinIdenticalVertices |
             aiProcess_OptimizeMeshes);
+
+        if (!scene) {
+            scene = importer.ReadFile(absolutePath, 
+            aiProcess_Triangulate | 
+            aiProcess_FlipUVs | 
+            aiProcess_CalcTangentSpace |
+            aiProcess_GenNormals |
+            aiProcess_JoinIdenticalVertices |
+            aiProcess_OptimizeMeshes);
+        }
         
         if (!scene || scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE || !scene->mRootNode) {
             throw std::runtime_error("Failed to load model: " + absolutePath + " - " + importer.GetErrorString());
         }
         
         Model model;
-        model.directory = FileUtils::getDirectory(absolutePath);
+        model.directory = FileUtils::getDirectory(path);
         
         // Load materials
         loadMaterials(scene, model);

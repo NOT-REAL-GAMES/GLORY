@@ -16,6 +16,7 @@ if (MSVC)
 endif()
 
 set(CMAKE_POLICY_DEFAULT_CMP0091 NEW)
+set(CMAKE_POLICY_DEFAULT_CMP0175 NEW)
 
 find_package(Vulkan REQUIRED)
 
@@ -64,6 +65,8 @@ FetchContent_Declare(
     GIT_REPOSITORY "https://github.com/KhronosGroup/SPIRV-Cross.git"
     GIT_TAG "main"
 )
+
+set(GLM_BUILD_LIBRARY OFF CACHE BOOL "" FORCE)
 
 FetchContent_MakeAvailable(spirv-cross)
 
@@ -128,34 +131,24 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(VulkanMemoryAllocator)
 
 FetchContent_Declare(
-    tinyexr STATIC
-    GIT_REPOSITORY "https://github.com/syoyo/tinyexr.git"
-    GIT_TAG "v1.0.12"  # Try latest version
-)
-
-FetchContent_MakeAvailable(tinyexr)
-
-FetchContent_Declare(
     assimp STATIC
     GIT_REPOSITORY "https://github.com/assimp/assimp.git"
-    GIT_TAG "v5.4.3"
-    GIT_SHALLOW TRUE
 )
 
 # Disable most Assimp features to speed up build and avoid hangs
-set(ASSIMP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(ASSIMP_INSTALL OFF CACHE BOOL "" FORCE)
-set(ASSIMP_BUILD_ASSIMP_TOOLS OFF CACHE BOOL "" FORCE)
-set(ASSIMP_BUILD_SAMPLES OFF CACHE BOOL "" FORCE)
-set(ASSIMP_BUILD_ALL_EXPORTERS_BY_DEFAULT OFF CACHE BOOL "" FORCE)
-set(ASSIMP_BUILD_ALL_IMPORTERS_BY_DEFAULT OFF CACHE BOOL "" FORCE)
-set(ASSIMP_BUILD_GLTF_IMPORTER ON CACHE BOOL "" FORCE)
-set(ASSIMP_BUILD_OBJ_IMPORTER ON CACHE BOOL "" FORCE)
-set(ASSIMP_BUILD_FBX_IMPORTER ON CACHE BOOL "" FORCE)
-set(ASSIMP_NO_EXPORT ON CACHE BOOL "" FORCE)
-set(ASSIMP_BUILD_ZLIB OFF CACHE BOOL "" FORCE)
-set(ASSIMP_BUILD_ASSIMP_VIEW OFF CACHE BOOL "" FORCE)
-set(ASSIMP_BUILD_MINIZIP OFF CACHE BOOL "" FORCE)
+#set(ASSIMP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+#set(ASSIMP_INSTALL OFF CACHE BOOL "" FORCE)
+#set(ASSIMP_BUILD_ASSIMP_TOOLS OFF CACHE BOOL "" FORCE)
+#set(ASSIMP_BUILD_SAMPLES OFF CACHE BOOL "" FORCE)
+#set(ASSIMP_BUILD_ALL_EXPORTERS_BY_DEFAULT OFF CACHE BOOL "" FORCE)
+#set(ASSIMP_BUILD_ALL_IMPORTERS_BY_DEFAULT OFF CACHE BOOL "" FORCE)
+#set(ASSIMP_BUILD_GLTF_IMPORTER ON CACHE BOOL "" FORCE)
+#set(ASSIMP_BUILD_OBJ_IMPORTER ON CACHE BOOL "" FORCE)
+#set(ASSIMP_BUILD_FBX_IMPORTER ON CACHE BOOL "" FORCE)
+#set(ASSIMP_NO_EXPORT ON CACHE BOOL "" FORCE)
+#set(ASSIMP_BUILD_ZLIB ON CACHE BOOL "" FORCE)
+#set(ASSIMP_BUILD_ASSIMP_VIEW OFF CACHE BOOL "" FORCE)
+#set(ASSIMP_BUILD_MINIZIP OFF CACHE BOOL "" FORCE)
 
 FetchContent_MakeAvailable(assimp)
 
@@ -185,7 +178,6 @@ target_link_libraries(GLORY PUBLIC
     glslang::glslang
     SPIRV-Tools
     SPIRV-Headers
-    tinyexr
     assimp
     )
 
@@ -197,18 +189,6 @@ if(MSVC)
 endif()
 
 if(WIN32)
-   set(VULKAN_DLL_SOURCE_PATH "C:\\Windows\\System32\\vulkan-1.dll")
-
-    add_custom_command(
-        TARGET GLORY # Replace with the name of your executable
-        POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy
-                "${VULKAN_DLL_SOURCE_PATH}"
-                "$<TARGET_FILE_DIR:GLORY>" # Copies to the directory of your executable
-        COMMENT "Copying vulkan-1.dll to build directory"
-    )
-
-
     add_custom_command(
         TARGET GLORY
         POST_BUILD
