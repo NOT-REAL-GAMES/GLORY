@@ -38,6 +38,15 @@ VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 #include <cmath>
 #include <sys/stat.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#include <libgen.h>
+#elif defined(__linux__)
+#include <linux/limits.h>
+#include <libgen.h>
+#elif defined(_WIN32)
+#include <windows.h>
+#endif
 
 vk::detail::DispatchLoaderDynamic dl;
 
@@ -49,7 +58,33 @@ public:
         return (stat(path.c_str(), &buffer) == 0);
     }
     
-    static std::string getCurrentWorkingDirectory() {
+    static std::string getExecutableDirectory() {
+#ifdef __APPLE__
+        char path[1024];
+        uint32_t size = sizeof(path);
+        if (_NSGetExecutablePath(path, &size) == 0) {
+            char* dirPath = dirname(path);
+            return std::string(dirPath);
+        }
+#elif defined(__linux__)
+        char path[PATH_MAX];
+        ssize_t count = readlink("/proc/self/exe", path, PATH_MAX);
+        if (count != -1) {
+            path[count] = '\0';
+            char* dirPath = dirname(path);
+            return std::string(dirPath);
+        }
+#elif defined(_WIN32)
+        char path[MAX_PATH];
+        if (GetModuleFileNameA(NULL, path, MAX_PATH) != 0) {
+            char* lastSlash = strrchr(path, '\\');
+            if (lastSlash) {
+                *lastSlash = '\0';
+                return std::string(path);
+            }
+        }
+#endif
+        // Fallback to current working directory
         char cwd[1024];
         if (getcwd(cwd, sizeof(cwd)) != nullptr) {
             return std::string(cwd);
@@ -88,6 +123,19 @@ public:
             return "."; // Current directory if no path separator found
         }
         return normalized.substr(0, pos);
+    }
+    
+    static std::string resolveRelativePath(const std::string& relativePath) {
+        std::string normalized = normalizePath(relativePath);
+        
+        // If it's already an absolute path, return as-is
+        if (!normalized.empty() && normalized[0] == '/') {
+            return normalized;
+        }
+        
+        // For relative paths, resolve relative to executable directory
+        std::string execDir = getExecutableDirectory();
+        return joinPaths(execDir, normalized);
     }
 };
 
@@ -666,8 +714,8 @@ public:
     }
     
     void loadSponzaIfAvailable() {
-        std::cout << "Current working directory: " << FileUtils::getCurrentWorkingDirectory() << std::endl;
-        std::string sponzaPath = FileUtils::normalizePath("assets/models/sponza/Sponza.gltf");
+        std::cout << "Executable directory: " << FileUtils::getExecutableDirectory() << std::endl;
+        std::string sponzaPath = FileUtils::resolveRelativePath("assets/models/sponza/Sponza.gltf");
         std::cout << "Looking for Sponza model at: " << sponzaPath << std::endl;
         
         if (FileUtils::fileExists(sponzaPath)) {
@@ -1854,8 +1902,12 @@ private:
     }
     
     Model loadModel(const std::string& path) {
+        // Resolve to absolute path to ensure texture loading works correctly
+        std::string absolutePath = FileUtils::resolveRelativePath(path);
+        std::cout << "Loading model from absolute path: " << absolutePath << std::endl;
+        
         Assimp::Importer importer;
-        const aiScene* scene = importer.ReadFile(path, 
+        const aiScene* scene = importer.ReadFile(absolutePath, 
             aiProcess_Triangulate | 
             aiProcess_FlipUVs | 
             aiProcess_CalcTangentSpace |
@@ -1864,11 +1916,11 @@ private:
             aiProcess_OptimizeMeshes);
         
         if (!scene || scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE || !scene->mRootNode) {
-            throw std::runtime_error("Failed to load model: " + path + " - " + importer.GetErrorString());
+            throw std::runtime_error("Failed to load model: " + absolutePath + " - " + importer.GetErrorString());
         }
         
         Model model;
-        model.directory = FileUtils::getDirectory(path);
+        model.directory = FileUtils::getDirectory(absolutePath);
         
         // Load materials
         loadMaterials(scene, model);
