@@ -596,6 +596,18 @@ vec3 getNormalFromMap() {
 }
 
 void main() {
+    // DEBUG: Test texture sampling directly
+    if (false) { // Set to true for debug
+        // Show albedo texture directly
+        if (material.hasAlbedoTexture != 0) {
+            outColor = vec4(texture(albedoTexture, fragTexCoord).rgb, 1.0);
+            return;
+        } else {
+            outColor = vec4(1.0, 0.0, 1.0, 1.0); // Magenta if no texture
+            return;
+        }
+    }
+    
     // Sample textures
     vec3 albedo = material.hasAlbedoTexture != 0 ? 
         texture(albedoTexture, fragTexCoord).rgb * material.albedo : 
@@ -1947,6 +1959,9 @@ private:
         
         const Material& material = loadedModel.materials[materialIndex];
         
+        std::cout << "Updating material " << materialIndex << " descriptors:" << std::endl;
+        std::cout << "  Albedo texture index: " << material.albedoTextureIndex << " (loaded textures: " << loadedTextures.size() << ")" << std::endl;
+        
         // Determine which textures to use
         const Texture* albedoTex = (material.albedoTextureIndex >= 0 && material.albedoTextureIndex < loadedTextures.size()) 
             ? &loadedTextures[material.albedoTextureIndex] : &defaultAlbedoTexture;
@@ -1954,6 +1969,21 @@ private:
             ? &loadedTextures[material.normalTextureIndex] : &defaultNormalTexture;
         const Texture* metallicRoughnessTex = (material.metallicRoughnessTextureIndex >= 0 && material.metallicRoughnessTextureIndex < loadedTextures.size()) 
             ? &loadedTextures[material.metallicRoughnessTextureIndex] : &defaultMetallicRoughnessTexture;
+        
+        std::cout << "  Using textures: albedo=" << (albedoTex == &defaultAlbedoTexture ? "default" : "loaded") 
+                  << ", normal=" << (normalTex == &defaultNormalTexture ? "default" : "loaded") 
+                  << ", metallic=" << (metallicRoughnessTex == &defaultMetallicRoughnessTexture ? "default" : "loaded") << std::endl;
+        
+        // Validate texture objects
+        if (!albedoTex->imageView || !albedoTex->sampler) {
+            std::cerr << "ERROR: Invalid albedo texture!" << std::endl;
+        }
+        if (!normalTex->imageView || !normalTex->sampler) {
+            std::cerr << "ERROR: Invalid normal texture!" << std::endl;
+        }
+        if (!metallicRoughnessTex->imageView || !metallicRoughnessTex->sampler) {
+            std::cerr << "ERROR: Invalid metallic/roughness texture!" << std::endl;
+        }
         
         // Update texture descriptors
         std::array<vk::WriteDescriptorSet, 3> textureWrites{};
