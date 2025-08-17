@@ -597,10 +597,22 @@ vec3 getNormalFromMap() {
 
 void main() {
     // DEBUG: Test texture sampling directly
-    if (false) { // Set to true for debug
-        // Show albedo texture directly
+    if (true) { // Set to true for debug
+        // Show albedo texture directly with enhanced debugging
         if (material.hasAlbedoTexture != 0) {
-            outColor = vec4(texture(albedoTexture, fragTexCoord).rgb, 1.0);
+            vec4 texSample = texture(albedoTexture, fragTexCoord);
+            // Show individual channels to debug channel issues
+            // R=red, G=green, B=blue, mix=normal
+            float debugMode = fract(fragTexCoord.x * 4.0);
+            if (debugMode < 0.25) {
+                outColor = vec4(texSample.r, 0.0, 0.0, 1.0); // Red channel only
+            } else if (debugMode < 0.5) {
+                outColor = vec4(0.0, texSample.g, 0.0, 1.0); // Green channel only
+            } else if (debugMode < 0.75) {
+                outColor = vec4(0.0, 0.0, texSample.b, 1.0); // Blue channel only
+            } else {
+                outColor = vec4(texSample.rgb, 1.0); // Normal RGB
+            }
             return;
         } else {
             outColor = vec4(1.0, 0.0, 1.0, 1.0); // Magenta if no texture
@@ -1519,10 +1531,10 @@ private:
     
     vk::Format findSupportedTextureFormat() {
         std::vector<vk::Format> candidates = {
+            vk::Format::eR8G8B8A8Unorm,   // Try linear format first on Mac
             vk::Format::eR8G8B8A8Srgb,    // Preferred sRGB format
-            vk::Format::eR8G8B8A8Unorm,   // Linear format fallback
-            vk::Format::eB8G8R8A8Srgb,    // Alternative sRGB (common on Mac)
-            vk::Format::eB8G8R8A8Unorm    // Alternative linear
+            vk::Format::eB8G8R8A8Unorm,   // Alternative linear
+            vk::Format::eB8G8R8A8Srgb     // Alternative sRGB (common on Mac)
         };
         
         for (vk::Format format : candidates) {
@@ -1760,6 +1772,13 @@ private:
         
         std::cout << "Loading texture " << path << " (" << texWidth << "x" << texHeight << ", " << texChannels << " channels)" << std::endl;
         
+        // Debug: Check first few pixels to see if data is correct
+        std::cout << "  First pixel RGBA: " << (int)pixels[0] << ", " << (int)pixels[1] << ", " << (int)pixels[2] << ", " << (int)pixels[3] << std::endl;
+        if (texWidth > 1 || texHeight > 1) {
+            int midPixel = (texHeight / 2 * texWidth + texWidth / 2) * 4;
+            std::cout << "  Middle pixel RGBA: " << (int)pixels[midPixel] << ", " << (int)pixels[midPixel+1] << ", " << (int)pixels[midPixel+2] << ", " << (int)pixels[midPixel+3] << std::endl;
+        }
+        
         uint32_t mipLevels = static_cast<uint32_t>(std::floor(std::log2(std::max(texWidth, texHeight)))) + 1;
         
         // Create staging buffer
@@ -1780,6 +1799,11 @@ private:
         void* data;
         vmaMapMemory(allocator, stagingAllocation, &data);
         memcpy(data, pixels, static_cast<size_t>(imageSize));
+        
+        // Debug: Verify data after copy
+        unsigned char* copiedData = static_cast<unsigned char*>(data);
+        std::cout << "  After staging copy - First pixel RGBA: " << (int)copiedData[0] << ", " << (int)copiedData[1] << ", " << (int)copiedData[2] << ", " << (int)copiedData[3] << std::endl;
+        
         vmaUnmapMemory(allocator, stagingAllocation);
         
         stbi_image_free(pixels);
