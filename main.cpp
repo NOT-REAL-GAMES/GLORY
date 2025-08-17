@@ -597,7 +597,7 @@ vec3 getNormalFromMap() {
 
 void main() {
     // DEBUG: Test texture sampling directly
-    if (true) { // Set to true for debug
+    if (false) { // Set to true for debug
         // Show albedo texture directly with enhanced debugging
         if (material.hasAlbedoTexture != 0) {
             vec4 texSample = texture(albedoTexture, fragTexCoord);
@@ -1757,12 +1757,19 @@ private:
     
     Texture loadTexture(const std::string& path) {
         int texWidth, texHeight, texChannels;
+        std::cout << "Attempting to load: " << path << std::endl;
+        std::cout << "File exists check: " << (FileUtils::fileExists(path) ? "YES" : "NO") << std::endl;
+        
         stbi_uc* pixels = stbi_load(path.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
         vk::DeviceSize imageSize = texWidth * texHeight * 4;
         
         if (!pixels) {
+            std::cerr << "ERROR: stbi_load failed for " << path << std::endl;
+            std::cerr << "stbi_failure_reason: " << stbi_failure_reason() << std::endl;
             throw std::runtime_error("Failed to load texture image: " + path);
         }
+        
+        std::cout << "stbi_load SUCCESS for " << path << std::endl;
         
         // Handle channel swizzling for BGR formats
         if (needsChannelSwizzle(textureFormat)) {
@@ -1915,6 +1922,11 @@ private:
         uint8_t normalPixel[4] = {128, 128, 255, 255}; // Default normal (0, 0, 1) in tangent space
         uint8_t metallicRoughnessPixel[4] = {0, 128, 0, 255}; // No metallic, 0.5 roughness
         
+        std::cout << "Creating default textures with:" << std::endl;
+        std::cout << "  White pixel: " << (int)whitePixel[0] << ", " << (int)whitePixel[1] << ", " << (int)whitePixel[2] << ", " << (int)whitePixel[3] << std::endl;
+        std::cout << "  Normal pixel: " << (int)normalPixel[0] << ", " << (int)normalPixel[1] << ", " << (int)normalPixel[2] << ", " << (int)normalPixel[3] << std::endl;
+        std::cout << "  MetallicRoughness pixel: " << (int)metallicRoughnessPixel[0] << ", " << (int)metallicRoughnessPixel[1] << ", " << (int)metallicRoughnessPixel[2] << ", " << (int)metallicRoughnessPixel[3] << std::endl;
+        
         // Handle channel swizzling for BGR formats
         if (needsChannelSwizzle(textureFormat)) {
             std::cout << "Swizzling default texture channels for BGR format" << std::endl;
@@ -1997,6 +2009,10 @@ private:
         std::cout << "  Using textures: albedo=" << (albedoTex == &defaultAlbedoTexture ? "default" : "loaded") 
                   << ", normal=" << (normalTex == &defaultNormalTexture ? "default" : "loaded") 
                   << ", metallic=" << (metallicRoughnessTex == &defaultMetallicRoughnessTexture ? "default" : "loaded") << std::endl;
+        
+        if (albedoTex != &defaultAlbedoTexture) {
+            std::cout << "  Using loaded albedo texture index: " << material.albedoTextureIndex << std::endl;
+        }
         
         // Validate texture objects
         if (!albedoTex->imageView || !albedoTex->sampler) {
