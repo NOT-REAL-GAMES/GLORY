@@ -1530,11 +1530,9 @@ private:
     }
     
     vk::Format findSupportedTextureFormat() {
+        // Force use of the most basic, universally supported format for Mac debugging
         std::vector<vk::Format> candidates = {
-            vk::Format::eR8G8B8A8Unorm,   // Try linear format first on Mac
-            vk::Format::eR8G8B8A8Srgb,    // Preferred sRGB format
-            vk::Format::eB8G8R8A8Unorm,   // Alternative linear
-            vk::Format::eB8G8R8A8Srgb     // Alternative sRGB (common on Mac)
+            vk::Format::eR8G8B8A8Unorm    // Most basic format - should work everywhere
         };
         
         for (vk::Format format : candidates) {
@@ -1786,7 +1784,7 @@ private:
             std::cout << "  Middle pixel RGBA: " << (int)pixels[midPixel] << ", " << (int)pixels[midPixel+1] << ", " << (int)pixels[midPixel+2] << ", " << (int)pixels[midPixel+3] << std::endl;
         }
         
-        uint32_t mipLevels = static_cast<uint32_t>(std::floor(std::log2(std::max(texWidth, texHeight)))) + 1;
+        uint32_t mipLevels = 1; // Disable mipmaps for Mac debugging
         
         // Create staging buffer
         vk::Buffer stagingBuffer;
@@ -1828,9 +1826,17 @@ private:
         transitionImageLayout(texture.image, textureFormat, vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal, mipLevels);
         copyBufferToImage(stagingBuffer, texture.image, static_cast<uint32_t>(texWidth), static_cast<uint32_t>(texHeight));
         
+        // Ensure transfer is complete before continuing
+        device.waitIdle();
+        
         vmaDestroyBuffer(allocator, stagingBuffer, stagingAllocation);
         
-        generateMipmaps(texture.image, textureFormat, texWidth, texHeight, mipLevels);
+        // Since mipmaps are disabled, directly transition to shader read only
+        if (mipLevels == 1) {
+            transitionImageLayout(texture.image, textureFormat, vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eShaderReadOnlyOptimal, 1);
+        } else {
+            generateMipmaps(texture.image, textureFormat, texWidth, texHeight, mipLevels);
+        }
         
         texture.imageView = createImageView(texture.image, textureFormat, vk::ImageAspectFlagBits::eColor, mipLevels);
         
