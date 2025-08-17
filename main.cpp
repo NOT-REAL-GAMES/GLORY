@@ -344,6 +344,10 @@ private:
     vk::Extent2D swapChainExtent;
     vk::Format textureFormat;
     
+    // Shared samplers to reduce sampler count for MoltenVK compatibility
+    vk::Sampler sharedTextureSampler;    // For textures with mipmaps
+    vk::Sampler sharedDefaultSampler;    // For 1x1 default textures
+    
     vk::RenderPass renderPass;
     vk::DescriptorSetLayout descriptorSetLayout;
     vk::PipelineLayout pipelineLayout;
@@ -816,9 +820,13 @@ public:
                 vmaDestroyBuffer(allocator, materialUniformBuffers[i], materialUniformBufferAllocations[i]);
             }
             
-            // Cleanup textures
+            // Cleanup shared samplers first
+            if (sharedTextureSampler) device.destroySampler(sharedTextureSampler);
+            if (sharedDefaultSampler) device.destroySampler(sharedDefaultSampler);
+            
+            // Cleanup textures (don't destroy samplers since they're shared)
             auto cleanupTexture = [this](Texture& texture) {
-                if (texture.sampler) device.destroySampler(texture.sampler);
+                // Note: Don't destroy sampler since it's shared
                 if (texture.imageView) device.destroyImageView(texture.imageView);
                 if (texture.image) vmaDestroyImage(allocator, texture.image, texture.allocation);
             };
@@ -974,6 +982,9 @@ private:
         
         // Initialize texture format after device creation
         textureFormat = findSupportedTextureFormat();
+        
+        // Create shared samplers to reduce sampler count for MoltenVK
+        createSharedSamplers();
         
         return true;
         } catch (const std::exception& e) {
@@ -1549,6 +1560,51 @@ private:
         return device.createSampler(samplerInfo).value;
     }
     
+    void createSharedSamplers() {
+        std::cout << "Creating shared samplers for MoltenVK compatibility" << std::endl;
+        
+        // Create shared sampler for regular textures (with mipmaps)
+        auto textureSamplerInfo = vk::SamplerCreateInfo();
+        textureSamplerInfo.magFilter = vk::Filter::eLinear;
+        textureSamplerInfo.minFilter = vk::Filter::eLinear;
+        textureSamplerInfo.addressModeU = vk::SamplerAddressMode::eRepeat;
+        textureSamplerInfo.addressModeV = vk::SamplerAddressMode::eRepeat;
+        textureSamplerInfo.addressModeW = vk::SamplerAddressMode::eRepeat;
+        
+        // Check if anisotropic filtering is supported
+        auto deviceFeatures = physicalDevice.getFeatures();
+        if (deviceFeatures.samplerAnisotropy) {
+            textureSamplerInfo.anisotropyEnable = VK_TRUE;
+            auto properties = physicalDevice.getProperties();
+            // Clamp to reasonable values for Mac compatibility
+            textureSamplerInfo.maxAnisotropy = std::min(properties.limits.maxSamplerAnisotropy, 4.0f);
+        } else {
+            textureSamplerInfo.anisotropyEnable = VK_FALSE;
+            textureSamplerInfo.maxAnisotropy = 1.0f;
+        }
+        
+        textureSamplerInfo.borderColor = vk::BorderColor::eIntOpaqueBlack;
+        textureSamplerInfo.unnormalizedCoordinates = VK_FALSE;
+        textureSamplerInfo.compareEnable = VK_FALSE;
+        textureSamplerInfo.compareOp = vk::CompareOp::eAlways;
+        textureSamplerInfo.mipmapMode = vk::SamplerMipmapMode::eLinear;
+        textureSamplerInfo.mipLodBias = 0.0f;
+        textureSamplerInfo.minLod = 0.0f;
+        textureSamplerInfo.maxLod = VK_LOD_CLAMP_NONE; // Allow all mip levels
+        
+        sharedTextureSampler = device.createSampler(textureSamplerInfo).value;
+        
+        // Create shared sampler for default textures (no mipmaps)
+        auto defaultSamplerInfo = textureSamplerInfo; // Copy base settings
+        defaultSamplerInfo.anisotropyEnable = VK_FALSE; // No anisotropy for 1x1 textures
+        defaultSamplerInfo.maxAnisotropy = 1.0f;
+        defaultSamplerInfo.maxLod = 0.0f; // Single mip level
+        
+        sharedDefaultSampler = device.createSampler(defaultSamplerInfo).value;
+        
+        std::cout << "Created 2 shared samplers (texture + default)" << std::endl;
+    }
+    
     void createImage(uint32_t width, uint32_t height, uint32_t mipLevels, vk::Format format, 
                      vk::ImageTiling tiling, vk::ImageUsageFlags usage, vk::Image& image, VmaAllocation& allocation) {
         auto imageInfo = vk::ImageCreateInfo();
@@ -1734,8 +1790,8 @@ private:
         
         texture.imageView = createImageView(texture.image, textureFormat, vk::ImageAspectFlagBits::eColor, mipLevels);
         
-        // Create compatible sampler
-        texture.sampler = createCompatibleSampler(mipLevels);
+        // Use shared sampler for MoltenVK compatibility
+        texture.sampler = sharedTextureSampler;
         
         return texture;
     }
@@ -1878,8 +1934,8 @@ private:
         
         texture.imageView = createImageView(texture.image, textureFormat, vk::ImageAspectFlagBits::eColor, 1);
         
-        // Create compatible sampler
-        texture.sampler = createCompatibleSampler(1);
+        // Use shared default sampler for MoltenVK compatibility
+        texture.sampler = sharedDefaultSampler;
         
         return texture;
     }
