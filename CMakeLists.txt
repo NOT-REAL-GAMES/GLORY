@@ -94,6 +94,15 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(volk)
 
 FetchContent_Declare(
+    moltenvk STATIC
+    GIT_REPOSITORY "https://github.com/KhronosGroup/MoltenVK.git"
+    GIT_TAG "main"
+
+)
+
+FetchContent_MakeAvailable(moltenvk)
+
+FetchContent_Declare(
     glslang STATIC
     GIT_REPOSITORY "https://github.com/KhronosGroup/glslang.git"
     GIT_TAG "main"

@@ -1135,7 +1135,7 @@ private:
         // Choose surface format
         vk::SurfaceFormatKHR surfaceFormat = formats.value[0];
         for (const auto& availableFormat : formats.value) {
-            if (availableFormat.format == vk::Format::eB8G8R8A8Srgb && 
+            if (availableFormat.format == vk::Format::eR8G8B8A8Srgb && 
                 availableFormat.colorSpace == vk::ColorSpaceKHR::eSrgbNonlinear) {
                 surfaceFormat = availableFormat;
                 break;
@@ -1646,7 +1646,7 @@ private:
         imageInfo.sharingMode = vk::SharingMode::eExclusive;
         
         VmaAllocationCreateInfo allocInfo{};
-        allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+        allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
         
         if (vmaCreateImage(allocator, reinterpret_cast<VkImageCreateInfo*>(&imageInfo), &allocInfo,
                           reinterpret_cast<VkImage*>(&image), &allocation, nullptr) != VK_SUCCESS) {
@@ -1798,7 +1798,8 @@ private:
         bufferInfo.sharingMode = vk::SharingMode::eExclusive;
         
         VmaAllocationCreateInfo allocInfo{};
-        allocInfo.usage = VMA_MEMORY_USAGE_CPU_ONLY;
+        allocInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT;
         
         vmaCreateBuffer(allocator, reinterpret_cast<VkBufferCreateInfo*>(&bufferInfo), &allocInfo,
                        reinterpret_cast<VkBuffer*>(&stagingBuffer), &stagingAllocation, nullptr);
@@ -1995,8 +1996,8 @@ private:
         
         const Material& material = loadedModel.materials[materialIndex];
         
-        std::cout << "Updating material " << materialIndex << " descriptors:" << std::endl;
-        std::cout << "  Albedo texture index: " << material.albedoTextureIndex << " (loaded textures: " << loadedTextures.size() << ")" << std::endl;
+        //std::cout << "Updating material " << materialIndex << " descriptors:" << std::endl;
+        //std::cout << "  Albedo texture index: " << material.albedoTextureIndex << " (loaded textures: " << loadedTextures.size() << ")" << std::endl;
         
         // Determine which textures to use
         const Texture* albedoTex = (material.albedoTextureIndex >= 0 && material.albedoTextureIndex < loadedTextures.size()) 
@@ -2006,12 +2007,12 @@ private:
         const Texture* metallicRoughnessTex = (material.metallicRoughnessTextureIndex >= 0 && material.metallicRoughnessTextureIndex < loadedTextures.size()) 
             ? &loadedTextures[material.metallicRoughnessTextureIndex] : &defaultMetallicRoughnessTexture;
         
-        std::cout << "  Using textures: albedo=" << (albedoTex == &defaultAlbedoTexture ? "default" : "loaded") 
-                  << ", normal=" << (normalTex == &defaultNormalTexture ? "default" : "loaded") 
-                  << ", metallic=" << (metallicRoughnessTex == &defaultMetallicRoughnessTexture ? "default" : "loaded") << std::endl;
+        //std::cout << "  Using textures: albedo=" << (albedoTex == &defaultAlbedoTexture ? "default" : "loaded") 
+        //          << ", normal=" << (normalTex == &defaultNormalTexture ? "default" : "loaded") 
+        //          << ", metallic=" << (metallicRoughnessTex == &defaultMetallicRoughnessTexture ? "default" : "loaded") << std::endl;
         
         if (albedoTex != &defaultAlbedoTexture) {
-            std::cout << "  Using loaded albedo texture index: " << material.albedoTextureIndex << std::endl;
+            //std::cout << "  Using loaded albedo texture index: " << material.albedoTextureIndex << std::endl;
         }
         
         // Validate texture objects
@@ -2116,7 +2117,7 @@ private:
         }
         
         Model model;
-        model.directory = FileUtils::getDirectory(path);
+        model.directory = FileUtils::getDirectory(absolutePath);
         
         // Load materials
         loadMaterials(scene, model);
@@ -2134,7 +2135,7 @@ private:
     }
     
     void loadMaterials(const aiScene* scene, Model& model) {
-        for (unsigned int i = 0; i < scene->mNumMaterials; i++) {
+        for (unsigned int i = 0; i < scene->mNumMaterials-1; i++) {
             const aiMaterial* mat = scene->mMaterials[i];
             Material material;
             
@@ -2903,7 +2904,7 @@ private:
         
         // Update material
         PBRMaterial material{};
-        material.albedo = glm::vec3(1.0f, 1.0f, 1.0f);
+        material.albedo = glm::vec3(1.0f, 0.0f, 1.0f);
         material.metallic = 1.0f;
         material.roughness = 0.1f;
         material.ao = 0.5f;
