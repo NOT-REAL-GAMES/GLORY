@@ -185,6 +185,7 @@ struct Mesh {
 // PBR Material properties
 struct PBRMaterial {
     alignas(16) glm::vec3 albedo{1.0f, 1.0f, 1.0f};
+    alignas(4) float alpha{1.0f};
     alignas(4) float metallic{0.0f};
     alignas(4) float roughness{0.5f};
     alignas(4) float ao{1.0f};
@@ -193,6 +194,21 @@ struct PBRMaterial {
     alignas(4) int hasMetallicRoughnessTexture{0};
     alignas(4) int hasAOTexture{0};
 };
+
+// Skybox uniform buffer
+struct SkyboxUBO {
+    alignas(16) glm::vec3 horizonColor{0.7f, 0.9f, 1.0f}; // Light blue
+    alignas(4) float padding1{0.0f};
+    alignas(16) glm::vec3 zenithColor{0.2f, 0.5f, 1.0f};  // Darker blue
+    alignas(4) float padding2{0.0f};
+    alignas(16) glm::vec3 sunDirection{0.5f, 0.8f, 0.3f}; // Sun position
+    alignas(4) float sunIntensity{2.0f};
+    alignas(16) glm::vec3 sunColor{1.0f, 0.9f, 0.7f};     // Warm sun
+    alignas(4) float padding3{0.0f};
+};
+
+// We no longer need combined push constants - skybox is now a UBO
+
 // Material with texture indices
 struct Material {
     PBRMaterial properties;
@@ -200,6 +216,15 @@ struct Material {
     int normalTextureIndex = -1;
     int metallicRoughnessTextureIndex = -1;
     std::string name;
+};
+
+// Draw call information for sorting
+struct DrawCall {
+    uint32_t meshIndex;
+    uint32_t instanceIndex;
+    float distanceToCamera;
+    bool isTransparent;
+    PBRMaterial material;
 };
 
 // Model structure
@@ -254,7 +279,10 @@ public:
     
     void processKeyboard(const bool* keyState, float deltaTime) {
         float velocity = speed * deltaTime;
-        
+
+        if (keyState[SDL_SCANCODE_V])
+            velocity *= 10.0f;
+
         if (keyState[SDL_SCANCODE_W])
             position += front * velocity;
         if (keyState[SDL_SCANCODE_S])
@@ -351,7 +379,10 @@ private:
     vk::RenderPass renderPass;
     vk::DescriptorSetLayout descriptorSetLayout;
     vk::PipelineLayout pipelineLayout;
-    vk::Pipeline graphicsPipeline;
+    vk::Pipeline opaquePipeline;
+    vk::Pipeline transparentPipeline;
+    vk::Pipeline skyboxPipeline;
+    vk::PipelineLayout skyboxPipelineLayout;
     
     std::vector<vk::Framebuffer> swapChainFramebuffers;
     
@@ -381,6 +412,8 @@ private:
     std::vector<VmaAllocation> lightUniformBufferAllocations;
     std::vector<vk::Buffer> materialUniformBuffers;
     std::vector<VmaAllocation> materialUniformBufferAllocations;
+    std::vector<vk::Buffer> skyboxUniformBuffers;
+    std::vector<VmaAllocation> skyboxUniformBufferAllocations;
     
     // Textures
     Texture defaultAlbedoTexture;
@@ -456,12 +489,13 @@ void main() {
 #version 450
 
 layout(binding = 1) uniform LightUBO {
-    vec3 lightPositions[4];
-    vec3 lightColors[4];
+    vec4 lightPositions[4];
+    vec4 lightColors[4];
 } lights;
 
 layout(push_constant) uniform PBRMaterial {
     vec3 albedo;
+    float alpha;
     float metallic;
     float roughness;
     float ao;
@@ -470,6 +504,17 @@ layout(push_constant) uniform PBRMaterial {
     int hasMetallicRoughnessTexture;
     int hasAOTexture;
 } material;
+
+layout(binding = 5) uniform SkyboxUBO {
+    vec3 horizonColor;
+    float padding1;
+    vec3 zenithColor;
+    float padding2;
+    vec3 sunDirection;
+    float sunIntensity;
+    vec3 sunColor;
+    float padding3;
+} skybox;
 
 layout(binding = 2) uniform sampler2D albedoTexture;
 layout(binding = 3) uniform sampler2D normalTexture;
@@ -538,7 +583,7 @@ vec3 agxEotf(vec3 val) {
 float DistributionGGX(vec3 N, vec3 H, float roughness) {
     float a = roughness * roughness;
     float a2 = a * a;
-    float NdotH = max(dot(N, H), 0.0);
+    float NdotH = dot(N, H);
     float NdotH2 = NdotH * NdotH;
     
     float num = a2;
@@ -574,74 +619,81 @@ vec3 fresnelSchlick(float cosTheta, vec3 F0) {
 vec3 getNormalFromMap() {
     if(material.hasNormalTexture != 0){
         // Sample normal map
-        vec3 dp1 = dFdx(fragPos);
-        vec3 dp2 = dFdy(fragPos);
-
-        vec2 duv1 = dFdx(fragTexCoord);
-        vec2 duv2 = dFdy(fragTexCoord);
-        
-
         vec3 normalColor = texture(normalTexture, fragTexCoord).rgb;
-        vec3 tangentNormal = normalColor * 2.0 - 1.0;
+        vec3 tangentNormal = ((normalColor * 2.0) - 1.0);
+
+        tangentNormal = vec3(
+            -0.1,
+            -0.0,
+            1.0
+        );
+
         
-        // Use proper tangent vectors from vertex shader
-        vec3 N = normalize(fragNormal);
-
-        vec3 dp2perp = cross(dp2, N);
-        vec3 dp1perp = cross(N, dp1);
-
-        vec3 T = dp2perp * duv1.x + dp1perp * duv2.x;
-        vec3 B = dp2perp * duv1.y + dp1perp * duv2.y;
-
-        float invmax = inversesqrt(max(dot(T,T), dot(B,B)));
-        mat3 TBN = mat3(T * invmax, B * invmax, N);
         
-        //vec3 T = normalize(fragTangent.xyz);
+        // Use pre-computed tangent from vertex shader
+        vec3 N = (fragNormal);
+        vec3 T = (fragTangent.xyz);
         
         // Re-orthogonalize T with respect to N (Gram-Schmidt process)
-        //T = normalize(T - dot(T, N) * N);
+        T = (T - dot(T, N) * N);
         
         // Calculate bitangent using handedness
-        //vec3 B = cross(T, N) * fragTangent.w;
+        vec3 B = (cross(N, T)) * fragTangent.w;
         
         // Create TBN matrix
-        //mat3 TBN = mat3(T, B, N);
+        mat3 TBN = mat3( T,B,N );
         
-        return normalize(TBN * tangentNormal);
+        return (TBN * tangentNormal);
     }
     
-    return normalize(fragNormal);
+    return (fragNormal);
+}
+
+// Sample skybox color for ambient lighting
+vec3 sampleSkybox(vec3 direction) {
+    vec3 dir = normalize(direction);
+    float height = dir.y; // -1 to 1
+    
+    // Normalize to 0-1 range for mixing
+    float t = clamp(height * 0.5 + 0.5, 0.0, 1.0);
+    
+    // Mix colors based on height using skybox UBO values
+    vec3 skyColor = mix(skybox.horizonColor, skybox.zenithColor, t);
+    
+    // Add simple sun effect using skybox UBO values
+    vec3 sunDir = normalize(skybox.sunDirection);
+    float sun = pow(max(0.0, dot(dir, sunDir)), 64.0);
+    vec3 sunColor = skybox.sunColor * sun * skybox.sunIntensity;
+    
+    return skyColor + sunColor;
+}
+
+// Sample ambient lighting from skybox (hemispherical sampling)
+vec3 sampleAmbientSkybox(vec3 worldNormal) {
+    // Sample multiple directions in hemisphere for better approximation
+    vec3 ambient = vec3(0.0);
+    
+    // Sample skybox in several directions around the normal
+    ambient += sampleSkybox(worldNormal) * 0.4; // Main direction
+    ambient += sampleSkybox(worldNormal + vec3(0.3, 0.0, 0.0)) * 0.15;
+    ambient += sampleSkybox(worldNormal + vec3(-0.3, 0.0, 0.0)) * 0.15;
+    ambient += sampleSkybox(worldNormal + vec3(0.0, 0.0, 0.3)) * 0.15;
+    ambient += sampleSkybox(worldNormal + vec3(0.0, 0.0, -0.3)) * 0.15;
+    
+    return ambient * 0.3; // Scale down ambient contribution
 }
 
 void main() {
-    // DEBUG: Test texture sampling directly
-    if (false) { // Set to true for debug
-        // Show albedo texture directly with enhanced debugging
-        if (material.hasAlbedoTexture != 0) {
-            vec4 texSample = texture(albedoTexture, fragTexCoord);
-            // Show individual channels to debug channel issues
-            // R=red, G=green, B=blue, mix=normal
-            float debugMode = fract(fragTexCoord.x * 4.0);
-            if (debugMode < 0.25) {
-                outColor = vec4(texSample.r, 0.0, 0.0, 1.0); // Red channel only
-            } else if (debugMode < 0.5) {
-                outColor = vec4(0.0, texSample.g, 0.0, 1.0); // Green channel only
-            } else if (debugMode < 0.75) {
-                outColor = vec4(0.0, 0.0, texSample.b, 1.0); // Blue channel only
-            } else {
-                outColor = vec4(texSample.rgb, 1.0); // Normal RGB
-            }
-            return;
-        } else {
-            outColor = vec4(1.0, 0.0, 1.0, 1.0); // Magenta if no texture
-            return;
-        }
-    }
+    // Sample material textures
+    vec4 albedoSample = material.hasAlbedoTexture != 0 ? 
+        texture(albedoTexture, fragTexCoord) : vec4(1.0);
+    vec3 albedo = albedoSample.rgb * material.albedo;
+    float alpha = albedoSample.a * material.alpha;
     
-    // Sample textures
-    vec3 albedo = material.hasAlbedoTexture != 0 ? 
-        texture(albedoTexture, fragTexCoord).rgb * material.albedo : 
-        material.albedo;
+    // Early discard for fully transparent pixels
+    if (alpha < 0.01) {
+        discard;
+    }
     
     vec3 metallicRoughness = material.hasMetallicRoughnessTexture != 0 ?
         texture(metallicRoughnessTexture, fragTexCoord).rgb :
@@ -654,61 +706,54 @@ void main() {
     float ao = material.hasMetallicRoughnessTexture != 0 ? 
         metallicRoughness.r : material.ao;
     
-    vec3 N = getNormalFromMap();
-    vec3 V = normalize(-fragPos); // In view space, camera is at origin
+    // Get normal (disable normal mapping for now to fix artifacts)
+    vec3 N = normalize(fragNormal);
+    vec3 V = normalize(-fragPos);
     
+    // Base reflectance for dielectrics
     vec3 F0 = vec3(0.04);
     F0 = mix(F0, albedo, metallic);
     
-    vec3 ambient = vec3(0.0);
-
+    // Calculate lighting
     vec3 Lo = vec3(0.0);
     for(int i = 0; i < 4; ++i) {
-        vec3 L = normalize(lights.lightPositions[i] - fragPos);
-        vec3 H = normalize((V + L));
-        float distance = -length( fragPos - lights.lightPositions[i]);
-        float attenuation = 1.0 / (distance * distance);
-        vec3 radiance = lights.lightColors[i] * attenuation;
+        vec3 lightPos = lights.lightPositions[i].xyz;
+        vec3 lightColor = lights.lightColors[i].xyz;
         
-        float NDF = DistributionGGX(N, H, roughness);
-        float G = GeometrySmith(N, V, L, roughness);
+        vec3 L = normalize(lightPos - fragPos);
+        vec3 H = normalize(V + L);
 
         float NdotV = max(dot(N, V), 0.0);
-        float NdotL = max(dot(N, L), 0.0);
         float VdotH = max(dot(V, H), 0.0);
         float VdotL = max(dot(V, L), 0.0);
         float NdotH = max(dot(N, H), 0.0);
-
-        float wrap = 0.001;
-
-        vec3 F = fresnelSchlick(max(dot(H, V), 0.0)*2.0, F0);
-            
+        
+        float distance = length(lightPos - fragPos);
+        float attenuation = 1.0 / (distance * distance);
+        vec3 radiance = lightColor * attenuation;
+        
+        // Cook-Torrance BRDF
+        float NDF = DistributionGGX(N, H, roughness);
+        float G = GeometrySmith(N, V, L, roughness);
+        vec3 F = fresnelSchlick(max(dot(H, V), 0.0), F0);
+        
         vec3 kS = F;
         vec3 kD = vec3(1.0) - kS;
         kD *= 1.0 - metallic;
+        
+        vec3 numerator = NDF * G * F;
+        float denominator = 4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.0001;
+        vec3 specular = numerator / denominator;
+        
+        float NdotL = max(dot(N, L), 0.0);
+        Lo += (kD * albedo / PI + specular) * radiance * NdotL;
 
-        vec3 specular = vec3(0.0);
-
-        if (NdotL > 0.0 && NdotV > 0.0) {
-
-
-            //G = min(1.0, min(2.0 * NdotH * NdotV / VdotH, 2.0 * NdotH * NdotL / VdotH));
-
-
-            
-            vec3 numerator = NDF * G * F;
-            float denominator = 4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.001;
-            specular = numerator / denominator;
-        }
-
-        vec3 diffuse = kD * albedo / PI * NdotL;
-
-            // For rough surfaces, use a softer falloff
+                    // For rough surfaces, use a softer falloff
             float softNdotL = smoothstep(-roughness, 1.0, NdotL);
             // Standard BRDF for smooth surfaces
-            Lo += (diffuse * radiance) + (specular * radiance * softNdotL);
+            //Lo += (diffuse * radiance) + (specular * radiance);
             
-            float viewRim = 1.0 - max(6.0 * softNdotL * NdotH * NdotV / -VdotH*8.0, 0.0);
+            float viewRim = 1.0 - max(6.0 * softNdotL * NdotH * NdotV / (VdotH * 8.0 + 0.001), 0.0);
             viewRim = pow(viewRim, 2.5); // Tighten the rim
 
             // Modulate rim by light contribution
@@ -718,23 +763,96 @@ void main() {
             // Make rim stronger on smooth surfaces
             rim *= (1.0 - roughness * 0.5);
 
-            vec3 rimColor = lights.lightColors[i] * rim * 0.02; // Use actual light color
-            Lo += rimColor * radiance;
-
+            vec3 rimColor = lights.lightColors[i].xyz * rim * 0.63; // Use actual light color
+            Lo += min(vec3(0.0),rimColor * radiance);
 
     }
     
-    ambient += vec3(0.003) * albedo * ao;
+    // Ambient lighting from skybox
+    vec3 ambientSky = sampleAmbientSkybox(N);
+    vec3 ambient = ambientSky * albedo * ao;
     vec3 color = ambient + Lo;
     
     // HDR tonemapping
     color = agx(color);
-    color = pow(agxEotf(color),vec3(2.0));
-
+    color = pow(agxEotf(color), vec3(2.7));
+    
     // Gamma correction
     color = pow(color, vec3(1.0/2.2));
     
-    outColor = vec4(color, 1.0);
+    outColor = vec4(color, alpha);
+}
+)";
+
+    // Skybox shaders
+    const std::string skyboxVertShaderSource = R"(
+#version 450
+
+// Fullscreen triangle vertices
+vec2 positions[3] = vec2[](
+    vec2(-1.0, -1.0),
+    vec2( 3.0, -1.0),
+    vec2(-1.0,  3.0)
+);
+
+layout(binding = 0) uniform CameraUBO {
+    mat4 view;
+    mat4 proj;
+    vec3 viewPos;
+    vec3 invViewPos;
+} camera;
+
+layout(location = 0) out vec3 worldDirection;
+
+void main() {
+    vec2 pos = positions[gl_VertexIndex];
+    gl_Position = vec4(pos, 1.0, 1.0);
+    
+    // Calculate world direction from screen position
+    vec4 clipPos = vec4(pos, 1.0, 1.0);
+    mat4 invViewProj = inverse(camera.proj * mat4(mat3(camera.view))); // Remove translation
+    vec4 worldPos = invViewProj * clipPos;
+    worldDirection = normalize(worldPos.xyz);
+}
+)";
+
+    const std::string skyboxFragShaderSource = R"(
+#version 450
+
+layout(location = 0) in vec3 worldDirection;
+layout(location = 0) out vec4 outColor;
+
+layout(binding = 5) uniform SkyboxUBO {
+    vec3 horizonColor;
+    float padding1;
+    vec3 zenithColor;
+    float padding2;
+    vec3 sunDirection;
+    float sunIntensity;
+    vec3 sunColor;
+    float padding3;
+} skybox;
+
+void main() {
+    vec3 dir = normalize(worldDirection);
+    
+    // Create a simple sky gradient based on Y coordinate
+    float height = dir.y; // -1 to 1
+    
+    // Normalize to 0-1 range for mixing
+    float t = clamp(height * 0.5 + 0.5, 0.0, 1.0);
+    
+    // Mix colors based on height using push constant values
+    vec3 skyColor = mix(skybox.horizonColor, skybox.zenithColor, t);
+    
+    // Add simple sun effect using push constant values
+    vec3 sunDir = normalize(skybox.sunDirection);
+    float sun = pow(max(0.0, dot(dir, sunDir)), 64.0);
+    vec3 sunColor = skybox.sunColor * sun * skybox.sunIntensity;
+    
+    vec3 finalColor = skyColor + sunColor;
+    
+    outColor = vec4(finalColor, 1.0);
 }
 )";
 
@@ -748,6 +866,7 @@ public:
         if (!createDepthResources()) return false;
         if (!createDescriptorSetLayout()) return false;
         if (!createGraphicsPipeline()) return false;
+        if (!createSkyboxPipeline()) return false;
         if (!createFramebuffers()) return false;
         if (!createCommandPool()) return false;
         if (!createVertexBuffer()) return false;
@@ -763,7 +882,7 @@ public:
     
     void loadSponzaIfAvailable() {
         std::cout << "Executable directory: " << FileUtils::getExecutableDirectory() << std::endl;
-        std::string sponzaPath = FileUtils::resolveRelativePath("assets/models/FlightHelmet/FlightHelmet.gltf");
+        std::string sponzaPath = FileUtils::resolveRelativePath("assets/models/nyc/nyc.gltf");
         std::cout << "Looking for Sponza model at: " << sponzaPath << std::endl;
         
         if (FileUtils::fileExists(sponzaPath)) {
@@ -861,6 +980,7 @@ public:
                 vmaDestroyBuffer(allocator, cameraUniformBuffers[i], cameraUniformBufferAllocations[i]);
                 vmaDestroyBuffer(allocator, lightUniformBuffers[i], lightUniformBufferAllocations[i]);
                 vmaDestroyBuffer(allocator, materialUniformBuffers[i], materialUniformBufferAllocations[i]);
+                vmaDestroyBuffer(allocator, skyboxUniformBuffers[i], skyboxUniformBufferAllocations[i]);
             }
             
             // Cleanup shared samplers first
@@ -904,8 +1024,11 @@ public:
                 device.destroyFramebuffer(framebuffer);
             }
             
-            device.destroyPipeline(graphicsPipeline);
+            device.destroyPipeline(opaquePipeline);
+            device.destroyPipeline(transparentPipeline);
+            device.destroyPipeline(skyboxPipeline);
             device.destroyPipelineLayout(pipelineLayout);
+            device.destroyPipelineLayout(skyboxPipelineLayout);
             device.destroyRenderPass(renderPass);
             device.destroyDescriptorSetLayout(descriptorSetLayout);
             
@@ -1154,7 +1277,7 @@ private:
         // Choose surface format
         vk::SurfaceFormatKHR surfaceFormat = formats.value[0];
         for (const auto& availableFormat : formats.value) {
-            if (availableFormat.format == vk::Format::eR8G8B8A8Srgb && 
+            if (availableFormat.format == vk::Format::eB8G8R8A8Srgb && 
                 availableFormat.colorSpace == vk::ColorSpaceKHR::eSrgbNonlinear) {
                 surfaceFormat = availableFormat;
                 break;
@@ -1324,7 +1447,7 @@ private:
     }
     
     bool createDescriptorSetLayout() {
-        std::array<vk::DescriptorSetLayoutBinding, 5> bindings{};
+        std::array<vk::DescriptorSetLayoutBinding, 6> bindings{};
         
         // Camera uniform buffer
         bindings[0].binding = 0;
@@ -1360,6 +1483,13 @@ private:
         bindings[4].descriptorType = vk::DescriptorType::eCombinedImageSampler;
         bindings[4].pImmutableSamplers = nullptr;
         bindings[4].stageFlags = vk::ShaderStageFlagBits::eFragment;
+        
+        // Skybox uniform buffer (binding 5)
+        bindings[5].binding = 5;
+        bindings[5].descriptorCount = 1;
+        bindings[5].descriptorType = vk::DescriptorType::eUniformBuffer;
+        bindings[5].pImmutableSamplers = nullptr;
+        bindings[5].stageFlags = vk::ShaderStageFlagBits::eFragment;
         
         auto layoutInfo = vk::DescriptorSetLayoutCreateInfo();
         layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
@@ -2066,6 +2196,7 @@ private:
             // Return default material
             PBRMaterial defaultMat{};
             defaultMat.albedo = glm::vec3(1.0f);
+            defaultMat.alpha = 1.0f;
             defaultMat.metallic = 0.0f;
             defaultMat.roughness = 0.5f;
             defaultMat.ao = 1.0f;
@@ -2092,14 +2223,19 @@ private:
         const aiScene* scene = importer.ReadFile(path, 
             aiProcess_Triangulate | 
             aiProcess_FlipUVs |
-            aiProcessPreset_TargetRealtime_MaxQuality |
-            aiProcess_OptimizeMeshes);
+            //aiProcess_ForceGenNormals |
+            //aiProcess_CalcTangentSpace |
+            aiProcessPreset_TargetRealtime_MaxQuality //|
+            /*aiProcess_OptimizeMeshes*/);
 
         if (!scene) {
             scene = importer.ReadFile(absolutePath, 
             aiProcess_Triangulate | 
-            aiProcess_FlipUVs | 
-            aiProcess_OptimizeMeshes);
+            aiProcess_FlipUVs |
+            //aiProcess_ForceGenNormals |
+            //aiProcess_CalcTangentSpace |
+            aiProcessPreset_TargetRealtime_MaxQuality  //|
+            /*aiProcess_OptimizeMeshes*/);
         }
         
         if (!scene || scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE || !scene->mRootNode) {
@@ -2389,7 +2525,7 @@ private:
         
         std::array<vk::PipelineShaderStageCreateInfo, 2> shaderStages = {vertShaderStageInfo, fragShaderStageInfo};
         
-        // Create pipeline layout with push constants for material data
+        // Create pipeline layout with push constants for material data only
         vk::PushConstantRange pushConstantRange;
         pushConstantRange.stageFlags = vk::ShaderStageFlagBits::eFragment;
         pushConstantRange.offset = 0;
@@ -2457,9 +2593,16 @@ private:
         multisampling.sampleShadingEnable = VK_FALSE;
         
         auto colorBlendAttachment = vk::PipelineColorBlendAttachmentState();
-        colorBlendAttachment.blendEnable = VK_FALSE;
+        colorBlendAttachment.blendEnable = VK_TRUE;
         colorBlendAttachment.colorWriteMask = vk::ColorComponentFlagBits::eR | vk::ColorComponentFlagBits::eG | 
                               vk::ColorComponentFlagBits::eB | vk::ColorComponentFlagBits::eA;
+        // Standard alpha blending: src_alpha * src_color + (1 - src_alpha) * dst_color
+        colorBlendAttachment.srcColorBlendFactor = vk::BlendFactor::eSrcAlpha;
+        colorBlendAttachment.dstColorBlendFactor = vk::BlendFactor::eOneMinusSrcAlpha;
+        colorBlendAttachment.colorBlendOp = vk::BlendOp::eAdd;
+        colorBlendAttachment.srcAlphaBlendFactor = vk::BlendFactor::eOne;
+        colorBlendAttachment.dstAlphaBlendFactor = vk::BlendFactor::eZero;
+        colorBlendAttachment.alphaBlendOp = vk::BlendOp::eAdd;
         
         auto colorBlending = vk::PipelineColorBlendStateCreateInfo();
         colorBlending.logicOpEnable = VK_FALSE;
@@ -2471,40 +2614,242 @@ private:
         colorBlending.blendConstants[2] = 0.0f;
         colorBlending.blendConstants[3] = 0.0f;
         
-        auto depthStencil = vk::PipelineDepthStencilStateCreateInfo();
-        depthStencil.depthTestEnable = VK_TRUE;
-        depthStencil.depthWriteEnable = VK_TRUE;
-        depthStencil.depthCompareOp = vk::CompareOp::eLess;
-        depthStencil.depthBoundsTestEnable = VK_FALSE;
-        depthStencil.stencilTestEnable = VK_FALSE;
+        // Create opaque pipeline (depth writes enabled, no blending)
+        auto opaqueDepthStencil = vk::PipelineDepthStencilStateCreateInfo();
+        opaqueDepthStencil.depthTestEnable = VK_TRUE;
+        opaqueDepthStencil.depthWriteEnable = VK_TRUE; // Enable depth writes for opaque objects
+        opaqueDepthStencil.depthCompareOp = vk::CompareOp::eLess;
+        opaqueDepthStencil.depthBoundsTestEnable = VK_FALSE;
+        opaqueDepthStencil.stencilTestEnable = VK_FALSE;
         
-        auto pipelineInfo = vk::GraphicsPipelineCreateInfo();
-        pipelineInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
-        pipelineInfo.pStages = shaderStages.data();
-        pipelineInfo.pVertexInputState = &vertexInputInfo;
-        pipelineInfo.pInputAssemblyState = &inputAssembly;
-        pipelineInfo.pViewportState = &viewportState;
-        pipelineInfo.pRasterizationState = &rasterizer;
-        pipelineInfo.pMultisampleState = &multisampling;
-        pipelineInfo.pDepthStencilState = &depthStencil;
-        pipelineInfo.pColorBlendState = &colorBlending;
-        pipelineInfo.layout = pipelineLayout;
-        pipelineInfo.renderPass = renderPass;
-        pipelineInfo.subpass = 0;
-        pipelineInfo.basePipelineHandle = nullptr;
+        auto opaqueColorBlendAttachment = vk::PipelineColorBlendAttachmentState();
+        opaqueColorBlendAttachment.blendEnable = VK_FALSE; // No blending for opaque objects
+        opaqueColorBlendAttachment.colorWriteMask = vk::ColorComponentFlagBits::eR | vk::ColorComponentFlagBits::eG | 
+                              vk::ColorComponentFlagBits::eB | vk::ColorComponentFlagBits::eA;
         
-        auto pipelineResult = device.createGraphicsPipeline(nullptr, pipelineInfo);
-        if (pipelineResult.result != vk::Result::eSuccess) {
-            std::cerr << "Failed to create graphics pipeline\n";
+        auto opaqueColorBlending = vk::PipelineColorBlendStateCreateInfo();
+        opaqueColorBlending.logicOpEnable = VK_FALSE;
+        opaqueColorBlending.logicOp = vk::LogicOp::eCopy;
+        opaqueColorBlending.attachmentCount = 1;
+        opaqueColorBlending.pAttachments = &opaqueColorBlendAttachment;
+        opaqueColorBlending.blendConstants[0] = 0.0f;
+        opaqueColorBlending.blendConstants[1] = 0.0f;
+        opaqueColorBlending.blendConstants[2] = 0.0f;
+        opaqueColorBlending.blendConstants[3] = 0.0f;
+        
+        auto opaquePipelineInfo = vk::GraphicsPipelineCreateInfo();
+        opaquePipelineInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
+        opaquePipelineInfo.pStages = shaderStages.data();
+        opaquePipelineInfo.pVertexInputState = &vertexInputInfo;
+        opaquePipelineInfo.pInputAssemblyState = &inputAssembly;
+        opaquePipelineInfo.pViewportState = &viewportState;
+        opaquePipelineInfo.pRasterizationState = &rasterizer;
+        opaquePipelineInfo.pMultisampleState = &multisampling;
+        opaquePipelineInfo.pDepthStencilState = &opaqueDepthStencil;
+        opaquePipelineInfo.pColorBlendState = &opaqueColorBlending;
+        opaquePipelineInfo.layout = pipelineLayout;
+        opaquePipelineInfo.renderPass = renderPass;
+        opaquePipelineInfo.subpass = 0;
+        opaquePipelineInfo.basePipelineHandle = nullptr;
+        
+        auto opaquePipelineResult = device.createGraphicsPipeline(nullptr, opaquePipelineInfo);
+        if (opaquePipelineResult.result != vk::Result::eSuccess) {
+            std::cerr << "Failed to create opaque graphics pipeline\n";
             device.destroyShaderModule(fragShaderModule);
             device.destroyShaderModule(vertShaderModule);
             glslang::FinalizeProcess();
             return false;
         }
-        graphicsPipeline = pipelineResult.value;
+        opaquePipeline = opaquePipelineResult.value;
+        
+        // Create transparent pipeline (depth writes disabled, blending enabled)
+        auto transparentDepthStencil = vk::PipelineDepthStencilStateCreateInfo();
+        transparentDepthStencil.depthTestEnable = VK_TRUE;
+        transparentDepthStencil.depthWriteEnable = VK_FALSE; // Disable depth writes for transparency
+        transparentDepthStencil.depthCompareOp = vk::CompareOp::eLess;
+        transparentDepthStencil.depthBoundsTestEnable = VK_FALSE;
+        transparentDepthStencil.stencilTestEnable = VK_FALSE;
+        
+        auto transparentPipelineInfo = vk::GraphicsPipelineCreateInfo();
+        transparentPipelineInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
+        transparentPipelineInfo.pStages = shaderStages.data();
+        transparentPipelineInfo.pVertexInputState = &vertexInputInfo;
+        transparentPipelineInfo.pInputAssemblyState = &inputAssembly;
+        transparentPipelineInfo.pViewportState = &viewportState;
+        transparentPipelineInfo.pRasterizationState = &rasterizer;
+        transparentPipelineInfo.pMultisampleState = &multisampling;
+        transparentPipelineInfo.pDepthStencilState = &transparentDepthStencil;
+        transparentPipelineInfo.pColorBlendState = &colorBlending; // Use existing blend state
+        transparentPipelineInfo.layout = pipelineLayout;
+        transparentPipelineInfo.renderPass = renderPass;
+        transparentPipelineInfo.subpass = 0;
+        transparentPipelineInfo.basePipelineHandle = nullptr;
+        
+        auto transparentPipelineResult = device.createGraphicsPipeline(nullptr, transparentPipelineInfo);
+        if (transparentPipelineResult.result != vk::Result::eSuccess) {
+            std::cerr << "Failed to create transparent graphics pipeline\n";
+            device.destroyPipeline(opaquePipeline);
+            device.destroyShaderModule(fragShaderModule);
+            device.destroyShaderModule(vertShaderModule);
+            glslang::FinalizeProcess();
+            return false;
+        }
+        transparentPipeline = transparentPipelineResult.value;
         
         device.destroyShaderModule(fragShaderModule);
         device.destroyShaderModule(vertShaderModule);
+        
+        glslang::FinalizeProcess();
+        
+        return true;
+    }
+    
+    bool createSkyboxPipeline() {
+        // Initialize glslang
+        if (!glslang::InitializeProcess()) {
+            std::cerr << "Failed to initialize glslang process for skybox\n";
+            return false;
+        }
+        
+        // Compile skybox shaders
+        auto skyboxVertSpirv = compileShader(skyboxVertShaderSource, EShLangVertex);
+        if (skyboxVertSpirv.empty()) {
+            std::cerr << "Failed to compile skybox vertex shader\n";
+            glslang::FinalizeProcess();
+            return false;
+        }
+        
+        auto skyboxFragSpirv = compileShader(skyboxFragShaderSource, EShLangFragment);
+        if (skyboxFragSpirv.empty()) {
+            std::cerr << "Failed to compile skybox fragment shader\n";
+            glslang::FinalizeProcess();
+            return false;
+        }
+        
+        auto skyboxVertShaderModule = createShaderModule(skyboxVertSpirv);
+        auto skyboxFragShaderModule = createShaderModule(skyboxFragSpirv);
+        
+        auto skyboxVertShaderStageInfo = vk::PipelineShaderStageCreateInfo();
+        skyboxVertShaderStageInfo.stage = vk::ShaderStageFlagBits::eVertex;
+        skyboxVertShaderStageInfo.module = skyboxVertShaderModule;
+        skyboxVertShaderStageInfo.pName = "main";
+        
+        auto skyboxFragShaderStageInfo = vk::PipelineShaderStageCreateInfo();
+        skyboxFragShaderStageInfo.stage = vk::ShaderStageFlagBits::eFragment;
+        skyboxFragShaderStageInfo.module = skyboxFragShaderModule;
+        skyboxFragShaderStageInfo.pName = "main";
+        
+        std::array<vk::PipelineShaderStageCreateInfo, 2> skyboxShaderStages = {skyboxVertShaderStageInfo, skyboxFragShaderStageInfo};
+        
+        // Create skybox pipeline layout (no push constants needed, uses UBO)
+        auto skyboxPipelineLayoutInfo = vk::PipelineLayoutCreateInfo();
+        skyboxPipelineLayoutInfo.setLayoutCount = 1;
+        skyboxPipelineLayoutInfo.pSetLayouts = &descriptorSetLayout; // Use same descriptor set layout
+        skyboxPipelineLayoutInfo.pushConstantRangeCount = 0;
+        skyboxPipelineLayoutInfo.pPushConstantRanges = nullptr;
+        
+        auto skyboxLayoutResult = device.createPipelineLayout(skyboxPipelineLayoutInfo);
+        if (skyboxLayoutResult.result != vk::Result::eSuccess) {
+            std::cerr << "Failed to create skybox pipeline layout\n";
+            device.destroyShaderModule(skyboxFragShaderModule);
+            device.destroyShaderModule(skyboxVertShaderModule);
+            glslang::FinalizeProcess();
+            return false;
+        }
+        skyboxPipelineLayout = skyboxLayoutResult.value;
+        
+        // No vertex input for skybox (uses fullscreen triangle)
+        auto skyboxVertexInputInfo = vk::PipelineVertexInputStateCreateInfo();
+        skyboxVertexInputInfo.vertexBindingDescriptionCount = 0;
+        skyboxVertexInputInfo.vertexAttributeDescriptionCount = 0;
+        
+        auto skyboxInputAssembly = vk::PipelineInputAssemblyStateCreateInfo();
+        skyboxInputAssembly.topology = vk::PrimitiveTopology::eTriangleList;
+        skyboxInputAssembly.primitiveRestartEnable = VK_FALSE;
+        
+        auto skyboxViewport = vk::Viewport();
+        skyboxViewport.x = 0.0f;
+        skyboxViewport.y = 0.0f;
+        skyboxViewport.width = static_cast<float>(swapChainExtent.width);
+        skyboxViewport.height = static_cast<float>(swapChainExtent.height);
+        skyboxViewport.minDepth = 0.0f;
+        skyboxViewport.maxDepth = 1.0f;
+        
+        auto skyboxScissor = vk::Rect2D();
+        skyboxScissor.offset.x = 0;
+        skyboxScissor.offset.y = 0;
+        skyboxScissor.extent = swapChainExtent;
+        
+        auto skyboxViewportState = vk::PipelineViewportStateCreateInfo();
+        skyboxViewportState.viewportCount = 1;
+        skyboxViewportState.pViewports = &skyboxViewport;
+        skyboxViewportState.scissorCount = 1;
+        skyboxViewportState.pScissors = &skyboxScissor;
+        
+        auto skyboxRasterizer = vk::PipelineRasterizationStateCreateInfo();
+        skyboxRasterizer.depthClampEnable = VK_FALSE;
+        skyboxRasterizer.rasterizerDiscardEnable = VK_FALSE;
+        skyboxRasterizer.polygonMode = vk::PolygonMode::eFill;
+        skyboxRasterizer.cullMode = vk::CullModeFlagBits::eNone; // No culling for skybox
+        skyboxRasterizer.frontFace = vk::FrontFace::eCounterClockwise;
+        skyboxRasterizer.depthBiasEnable = VK_FALSE;
+        skyboxRasterizer.lineWidth = 1.0f;
+        
+        auto skyboxMultisampling = vk::PipelineMultisampleStateCreateInfo();
+        skyboxMultisampling.rasterizationSamples = vk::SampleCountFlagBits::e1;
+        skyboxMultisampling.sampleShadingEnable = VK_FALSE;
+        
+        auto skyboxColorBlendAttachment = vk::PipelineColorBlendAttachmentState();
+        skyboxColorBlendAttachment.blendEnable = VK_FALSE;
+        skyboxColorBlendAttachment.colorWriteMask = vk::ColorComponentFlagBits::eR | vk::ColorComponentFlagBits::eG | 
+                              vk::ColorComponentFlagBits::eB | vk::ColorComponentFlagBits::eA;
+        
+        auto skyboxColorBlending = vk::PipelineColorBlendStateCreateInfo();
+        skyboxColorBlending.logicOpEnable = VK_FALSE;
+        skyboxColorBlending.logicOp = vk::LogicOp::eCopy;
+        skyboxColorBlending.attachmentCount = 1;
+        skyboxColorBlending.pAttachments = &skyboxColorBlendAttachment;
+        skyboxColorBlending.blendConstants[0] = 0.0f;
+        skyboxColorBlending.blendConstants[1] = 0.0f;
+        skyboxColorBlending.blendConstants[2] = 0.0f;
+        skyboxColorBlending.blendConstants[3] = 0.0f;
+        
+        // Skybox depth state - render where no geometry exists
+        auto skyboxDepthStencil = vk::PipelineDepthStencilStateCreateInfo();
+        skyboxDepthStencil.depthTestEnable = VK_FALSE; // Disable depth test for skybox
+        skyboxDepthStencil.depthWriteEnable = VK_FALSE; // Don't write depth for skybox
+        skyboxDepthStencil.depthCompareOp = vk::CompareOp::eAlways;
+        skyboxDepthStencil.depthBoundsTestEnable = VK_FALSE;
+        skyboxDepthStencil.stencilTestEnable = VK_FALSE;
+        
+        auto skyboxPipelineInfo = vk::GraphicsPipelineCreateInfo();
+        skyboxPipelineInfo.stageCount = static_cast<uint32_t>(skyboxShaderStages.size());
+        skyboxPipelineInfo.pStages = skyboxShaderStages.data();
+        skyboxPipelineInfo.pVertexInputState = &skyboxVertexInputInfo;
+        skyboxPipelineInfo.pInputAssemblyState = &skyboxInputAssembly;
+        skyboxPipelineInfo.pViewportState = &skyboxViewportState;
+        skyboxPipelineInfo.pRasterizationState = &skyboxRasterizer;
+        skyboxPipelineInfo.pMultisampleState = &skyboxMultisampling;
+        skyboxPipelineInfo.pDepthStencilState = &skyboxDepthStencil;
+        skyboxPipelineInfo.pColorBlendState = &skyboxColorBlending;
+        skyboxPipelineInfo.layout = skyboxPipelineLayout;
+        skyboxPipelineInfo.renderPass = renderPass;
+        skyboxPipelineInfo.subpass = 0;
+        skyboxPipelineInfo.basePipelineHandle = nullptr;
+        
+        auto skyboxPipelineResult = device.createGraphicsPipeline(nullptr, skyboxPipelineInfo);
+        if (skyboxPipelineResult.result != vk::Result::eSuccess) {
+            std::cerr << "Failed to create skybox graphics pipeline\n";
+            device.destroyPipelineLayout(skyboxPipelineLayout);
+            device.destroyShaderModule(skyboxFragShaderModule);
+            device.destroyShaderModule(skyboxVertShaderModule);
+            glslang::FinalizeProcess();
+            return false;
+        }
+        skyboxPipeline = skyboxPipelineResult.value;
+        
+        device.destroyShaderModule(skyboxFragShaderModule);
+        device.destroyShaderModule(skyboxVertShaderModule);
         
         glslang::FinalizeProcess();
         
@@ -2669,6 +3014,7 @@ private:
         vk::DeviceSize cameraBufferSize = sizeof(CameraUBO);
         vk::DeviceSize lightBufferSize = sizeof(LightUBO);
         vk::DeviceSize materialBufferSize = sizeof(PBRMaterial);
+        vk::DeviceSize skyboxBufferSize = sizeof(SkyboxUBO);
         
         cameraUniformBuffers.resize(MAX_FRAMES_IN_FLIGHT);
         cameraUniformBufferAllocations.resize(MAX_FRAMES_IN_FLIGHT);
@@ -2676,6 +3022,8 @@ private:
         lightUniformBufferAllocations.resize(MAX_FRAMES_IN_FLIGHT);
         materialUniformBuffers.resize(MAX_FRAMES_IN_FLIGHT);
         materialUniformBufferAllocations.resize(MAX_FRAMES_IN_FLIGHT);
+        skyboxUniformBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+        skyboxUniformBufferAllocations.resize(MAX_FRAMES_IN_FLIGHT);
         
         VmaAllocationCreateInfo allocInfo{};
         allocInfo.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
@@ -2703,6 +3051,13 @@ private:
             bufferInfo.size = materialBufferSize;
             if (vmaCreateBuffer(allocator, reinterpret_cast<VkBufferCreateInfo*>(&bufferInfo), &allocInfo, 
                                reinterpret_cast<VkBuffer*>(&materialUniformBuffers[i]), &materialUniformBufferAllocations[i], nullptr) != VK_SUCCESS) {
+                return false;
+            }
+            
+            // Skybox uniform buffer
+            bufferInfo.size = skyboxBufferSize;
+            if (vmaCreateBuffer(allocator, reinterpret_cast<VkBufferCreateInfo*>(&bufferInfo), &allocInfo, 
+                               reinterpret_cast<VkBuffer*>(&skyboxUniformBuffers[i]), &skyboxUniformBufferAllocations[i], nullptr) != VK_SUCCESS) {
                 return false;
             }
         }
@@ -2756,6 +3111,11 @@ private:
             lightBufferInfo.offset = 0;
             lightBufferInfo.range = sizeof(LightUBO);
             
+            auto skyboxBufferInfo = vk::DescriptorBufferInfo();
+            skyboxBufferInfo.buffer = skyboxUniformBuffers[i];
+            skyboxBufferInfo.offset = 0;
+            skyboxBufferInfo.range = sizeof(SkyboxUBO);
+            
             auto albedoImageInfo = vk::DescriptorImageInfo();
             albedoImageInfo.imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
             albedoImageInfo.imageView = defaultAlbedoTexture.imageView;
@@ -2771,7 +3131,7 @@ private:
             metallicRoughnessImageInfo.imageView = defaultMetallicRoughnessTexture.imageView;
             metallicRoughnessImageInfo.sampler = defaultMetallicRoughnessTexture.sampler;
             
-            std::array<vk::WriteDescriptorSet, 5> descriptorWrites{};
+            std::array<vk::WriteDescriptorSet, 6> descriptorWrites{};
             
             descriptorWrites[0].dstSet = descriptorSets[i];
             descriptorWrites[0].dstBinding = 0;
@@ -2807,6 +3167,13 @@ private:
             descriptorWrites[4].descriptorCount = 1;
             descriptorWrites[4].descriptorType = vk::DescriptorType::eCombinedImageSampler;
             descriptorWrites[4].pImageInfo = &metallicRoughnessImageInfo;
+            
+            descriptorWrites[5].dstSet = descriptorSets[i];
+            descriptorWrites[5].dstBinding = 5;
+            descriptorWrites[5].dstArrayElement = 0;
+            descriptorWrites[5].descriptorCount = 1;
+            descriptorWrites[5].descriptorType = vk::DescriptorType::eUniformBuffer;
+            descriptorWrites[5].pBufferInfo = &skyboxBufferInfo;
             
             device.updateDescriptorSets(static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
         }
@@ -2888,10 +3255,10 @@ private:
             lightUbo.lightPositions[i] = glm::vec4((glm::vec3)viewSpacePos, 0.0f);
         }
         
-        lightUbo.lightColors[0] = glm::vec4(1.0f, 0.8f, 0.8f,0.0f);   // CYAN
-        lightUbo.lightColors[1] = glm::vec4(0.8f, 1.0f, 0.8f,0.0f);   // MAGENTA
-        lightUbo.lightColors[2] = glm::vec4(0.8f, 0.8f, 1.0f,0.0f);   // YELLOW
-        lightUbo.lightColors[3] = glm::vec4(0.0f, 0.0f, 0.0f,0.0f); // WHITE
+        lightUbo.lightColors[0] = glm::vec4(30.0f, 1.0f, 1.0f,0.0f);   // CYAN
+        lightUbo.lightColors[1] = glm::vec4(1.0f, 30.0f, 1.0f,0.0f);   // MAGENTA
+        lightUbo.lightColors[2] = glm::vec4(1.0f, 1.0f, 30.0f,0.0f);   // YELLOW
+        lightUbo.lightColors[3] = glm::vec4(0.1f, 0.1f, 0.1f,0.0f); // WHITE
         
         vmaMapMemory(allocator, lightUniformBufferAllocations[currentImage], &data);
         memcpy(data, &lightUbo, sizeof(lightUbo));
@@ -2900,6 +3267,7 @@ private:
         // Update material
         PBRMaterial material{};
         material.albedo = glm::vec3(1.0f, 0.0f, 1.0f);
+        material.alpha = 0.7f; // Semi-transparent for demo
         material.metallic = 1.0f;
         material.roughness = 0.1f;
         material.ao = 0.5f;
@@ -2907,6 +3275,18 @@ private:
         vmaMapMemory(allocator, materialUniformBufferAllocations[currentImage], &data);
         memcpy(data, &material, sizeof(material));
         vmaUnmapMemory(allocator, materialUniformBufferAllocations[currentImage]);
+        
+        // Update skybox
+        SkyboxUBO skyboxUbo{};
+        skyboxUbo.horizonColor = glm::vec3(0.7f, 0.9f, 1.0f);   // Light blue
+        skyboxUbo.zenithColor = glm::vec3(0.2f, 0.5f, 1.0f);    // Darker blue
+        skyboxUbo.sunDirection = glm::normalize(glm::vec3(0.5f, 0.8f, 0.3f));
+        skyboxUbo.sunIntensity = 2.0f;
+        skyboxUbo.sunColor = glm::vec3(1.0f, 0.9f, 0.7f);       // Warm sun
+        
+        vmaMapMemory(allocator, skyboxUniformBufferAllocations[currentImage], &data);
+        memcpy(data, &skyboxUbo, sizeof(skyboxUbo));
+        vmaUnmapMemory(allocator, skyboxUniformBufferAllocations[currentImage]);
     }
     
     void recordCommandBuffer(vk::CommandBuffer commandBuffer, uint32_t imageIndex) {
@@ -2932,19 +3312,93 @@ private:
         
         commandBuffer.beginRenderPass(&renderPassInfo, vk::SubpassContents::eInline);
         
-        commandBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, graphicsPipeline);
+        // Prepare draw calls for sorting
+        std::vector<DrawCall> drawCalls;
+        glm::vec3 cameraPos = camera.position;
         
         if (useModel && !loadedModel.meshes.empty()) {
-            // Render all meshes in the loaded model
+            // Collect draw calls from loaded model
             for (size_t meshIdx = 0; meshIdx < loadedModel.meshes.size(); meshIdx++) {
                 const auto& mesh = loadedModel.meshes[meshIdx];
+                PBRMaterial materialProps = getMaterialProperties(mesh.materialIndex);
                 
-                // Update descriptor set for this mesh's material BEFORE binding
+                // Calculate mesh center position (approximate)
+                glm::vec3 meshCenter = glm::vec3(0.0f); // For simplicity, use origin
+                float distanceToCamera = glm::length(cameraPos - meshCenter);
+                
+                DrawCall drawCall;
+                drawCall.meshIndex = static_cast<uint32_t>(meshIdx);
+                drawCall.instanceIndex = 0;
+                drawCall.distanceToCamera = distanceToCamera;
+                drawCall.isTransparent = (materialProps.alpha < 0.99f); // Consider < 0.99 as transparent
+                drawCall.material = materialProps;
+                
+                drawCalls.push_back(drawCall);
+            }
+        } else {
+            // Add default sphere draw call
+            PBRMaterial material{};
+            material.albedo = glm::vec3(1.0f, 0.0f, 1.0f);
+            material.alpha = 0.7f; // Semi-transparent for demo
+            material.metallic = 1.0f;
+            material.roughness = 0.1f;
+            material.ao = 0.5f;
+            
+            DrawCall drawCall;
+            drawCall.meshIndex = 0; // Default sphere
+            drawCall.instanceIndex = 0;
+            drawCall.distanceToCamera = glm::length(cameraPos);
+            drawCall.isTransparent = (material.alpha < 0.99f);
+            drawCall.material = material;
+            
+            drawCalls.push_back(drawCall);
+        }
+        
+        // Separate opaque and transparent draw calls
+        std::vector<DrawCall> opaqueDrawCalls;
+        std::vector<DrawCall> transparentDrawCalls;
+        
+        for (const auto& drawCall : drawCalls) {
+            if (drawCall.isTransparent) {
+                transparentDrawCalls.push_back(drawCall);
+            } else {
+                opaqueDrawCalls.push_back(drawCall);
+            }
+        }
+        
+        // Sort opaque front-to-back (optional optimization)
+        std::sort(opaqueDrawCalls.begin(), opaqueDrawCalls.end(), 
+                  [](const DrawCall& a, const DrawCall& b) {
+                      return a.distanceToCamera < b.distanceToCamera;
+                  });
+        
+        // Sort transparent back-to-front (required for correct blending)
+        std::sort(transparentDrawCalls.begin(), transparentDrawCalls.end(), 
+                  [](const DrawCall& a, const DrawCall& b) {
+                      return a.distanceToCamera > b.distanceToCamera;
+                  });
+        
+        // PASS 0: Render skybox first
+        commandBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, skyboxPipeline);
+        
+        // Skybox data is now updated via UBO in updateUniformBuffer
+        commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, skyboxPipelineLayout, 0, 1, &descriptorSets[currentFrame], 0, nullptr);
+        
+        // Draw fullscreen triangle (no vertex buffer needed)
+        commandBuffer.draw(3, 1, 0, 0);
+        
+        // PASS 1: Render opaque objects
+        commandBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, opaquePipeline);
+        
+        for (const auto& drawCall : opaqueDrawCalls) {
+            if (useModel && !loadedModel.meshes.empty()) {
+                const auto& mesh = loadedModel.meshes[drawCall.meshIndex];
+                
+                // Update descriptor set for this mesh's material
                 updateMaterialDescriptors(currentFrame, mesh.materialIndex);
                 
                 // Push material constants
-                PBRMaterial materialProps = getMaterialProperties(mesh.materialIndex);
-                commandBuffer.pushConstants(pipelineLayout, vk::ShaderStageFlagBits::eFragment, 0, sizeof(PBRMaterial), &materialProps);
+                commandBuffer.pushConstants(pipelineLayout, vk::ShaderStageFlagBits::eFragment, 0, sizeof(PBRMaterial), &drawCall.material);
                 
                 std::array<vk::Buffer, 1> vertexBuffers = {mesh.vertexBuffer};
                 std::array<vk::DeviceSize, 1> offsets = {0};
@@ -2954,17 +3408,55 @@ private:
                 commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipelineLayout, 0, 1, &descriptorSets[currentFrame], 0, nullptr);
                 
                 commandBuffer.drawIndexed(static_cast<uint32_t>(mesh.indices.size()), 1, 0, 0, 0);
+            } else {
+                // Render default sphere (opaque version)
+                commandBuffer.pushConstants(pipelineLayout, vk::ShaderStageFlagBits::eFragment, 0, sizeof(PBRMaterial), &drawCall.material);
+                
+                std::array<vk::Buffer, 1> vertexBuffers = {vertexBuffer};
+                std::array<vk::DeviceSize, 1> offsets = {0};
+                commandBuffer.bindVertexBuffers(0, 1, vertexBuffers.data(), offsets.data());
+                commandBuffer.bindIndexBuffer(indexBuffer, 0, vk::IndexType::eUint32);
+                
+                commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipelineLayout, 0, 1, &descriptorSets[currentFrame], 0, nullptr);
+                
+                commandBuffer.drawIndexed(static_cast<uint32_t>(indices.size()), 1, 0, 0, 0);
             }
-        } else {
-            // Render the default sphere
-            std::array<vk::Buffer, 1> vertexBuffers = {vertexBuffer};
-            std::array<vk::DeviceSize, 1> offsets = {0};
-            commandBuffer.bindVertexBuffers(0, 1, vertexBuffers.data(), offsets.data());
-            commandBuffer.bindIndexBuffer(indexBuffer, 0, vk::IndexType::eUint32);
-            
-            commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipelineLayout, 0, 1, &descriptorSets[currentFrame], 0, nullptr);
-            
-            commandBuffer.drawIndexed(static_cast<uint32_t>(indices.size()), 1, 0, 0, 0);
+        }
+        
+        // PASS 2: Render transparent objects
+        commandBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, transparentPipeline);
+        
+        for (const auto& drawCall : transparentDrawCalls) {
+            if (useModel && !loadedModel.meshes.empty()) {
+                const auto& mesh = loadedModel.meshes[drawCall.meshIndex];
+                
+                // Update descriptor set for this mesh's material
+                updateMaterialDescriptors(currentFrame, mesh.materialIndex);
+                
+                // Push material constants
+                commandBuffer.pushConstants(pipelineLayout, vk::ShaderStageFlagBits::eFragment, 0, sizeof(PBRMaterial), &drawCall.material);
+                
+                std::array<vk::Buffer, 1> vertexBuffers = {mesh.vertexBuffer};
+                std::array<vk::DeviceSize, 1> offsets = {0};
+                commandBuffer.bindVertexBuffers(0, 1, vertexBuffers.data(), offsets.data());
+                commandBuffer.bindIndexBuffer(mesh.indexBuffer, 0, vk::IndexType::eUint32);
+                
+                commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipelineLayout, 0, 1, &descriptorSets[currentFrame], 0, nullptr);
+                
+                commandBuffer.drawIndexed(static_cast<uint32_t>(mesh.indices.size()), 1, 0, 0, 0);
+            } else {
+                // Render default sphere (transparent version)
+                commandBuffer.pushConstants(pipelineLayout, vk::ShaderStageFlagBits::eFragment, 0, sizeof(PBRMaterial), &drawCall.material);
+                
+                std::array<vk::Buffer, 1> vertexBuffers = {vertexBuffer};
+                std::array<vk::DeviceSize, 1> offsets = {0};
+                commandBuffer.bindVertexBuffers(0, 1, vertexBuffers.data(), offsets.data());
+                commandBuffer.bindIndexBuffer(indexBuffer, 0, vk::IndexType::eUint32);
+                
+                commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipelineLayout, 0, 1, &descriptorSets[currentFrame], 0, nullptr);
+                
+                commandBuffer.drawIndexed(static_cast<uint32_t>(indices.size()), 1, 0, 0, 0);
+            }
         }
         
         commandBuffer.endRenderPass();
