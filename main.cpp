@@ -2107,6 +2107,10 @@ private:
         
         Model model;
         model.directory = FileUtils::getDirectory(absolutePath);
+
+        #ifdef _WIN32
+            model.directory = FileUtils::getDirectory(path);
+        #endif
         
         // Load materials
         loadMaterials(scene, model);
