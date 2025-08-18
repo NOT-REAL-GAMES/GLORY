@@ -651,7 +651,8 @@ void main() {
         metallicRoughness.b : material.metallic;
     float roughness = material.hasMetallicRoughnessTexture != 0 ? 
         metallicRoughness.g : material.roughness;
-    float ao = material.ao;
+    float ao = material.hasMetallicRoughnessTexture != 0 ? 
+        metallicRoughness.r : material.ao;
     
     vec3 N = getNormalFromMap();
     vec3 V = normalize(-fragPos); // In view space, camera is at origin
@@ -2090,7 +2091,7 @@ private:
 
         const aiScene* scene = importer.ReadFile(path, 
             aiProcess_Triangulate | 
-            aiProcess_ConvertToLeftHanded |
+            aiProcess_FlipUVs |
             aiProcessPreset_TargetRealtime_MaxQuality |
             aiProcess_OptimizeMeshes);
 
@@ -2887,9 +2888,9 @@ private:
             lightUbo.lightPositions[i] = glm::vec4((glm::vec3)viewSpacePos, 0.0f);
         }
         
-        lightUbo.lightColors[0] = glm::vec4(4.0f, 0.0f, 0.0f,0.0f);   // CYAN
-        lightUbo.lightColors[1] = glm::vec4(0.0f, 4.0f, 0.0f,0.0f);   // MAGENTA
-        lightUbo.lightColors[2] = glm::vec4(0.0f, 0.0f, 4.0f,0.0f);   // YELLOW
+        lightUbo.lightColors[0] = glm::vec4(1.0f, 0.8f, 0.8f,0.0f);   // CYAN
+        lightUbo.lightColors[1] = glm::vec4(0.8f, 1.0f, 0.8f,0.0f);   // MAGENTA
+        lightUbo.lightColors[2] = glm::vec4(0.8f, 0.8f, 1.0f,0.0f);   // YELLOW
         lightUbo.lightColors[3] = glm::vec4(0.0f, 0.0f, 0.0f,0.0f); // WHITE
         
         vmaMapMemory(allocator, lightUniformBufferAllocations[currentImage], &data);
