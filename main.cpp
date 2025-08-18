@@ -144,7 +144,7 @@ struct Vertex {
     glm::vec3 pos;
     glm::vec3 normal;
     glm::vec2 texCoord;
-    glm::vec3 tangent;
+    glm::vec4 tangent; // xyz = tangent vector, w = handedness
     
     static vk::VertexInputBindingDescription getBindingDescription() {
         return vk::VertexInputBindingDescription(0, sizeof(Vertex), vk::VertexInputRate::eVertex);
@@ -155,7 +155,7 @@ struct Vertex {
             vk::VertexInputAttributeDescription(0, 0, vk::Format::eR32G32B32Sfloat, offsetof(Vertex, pos)),
             vk::VertexInputAttributeDescription(1, 0, vk::Format::eR32G32B32Sfloat, offsetof(Vertex, normal)),
             vk::VertexInputAttributeDescription(2, 0, vk::Format::eR32G32Sfloat, offsetof(Vertex, texCoord)),
-            vk::VertexInputAttributeDescription(3, 0, vk::Format::eR32G32B32Sfloat, offsetof(Vertex, tangent))
+            vk::VertexInputAttributeDescription(3, 0, vk::Format::eR32G32B32A32Sfloat, offsetof(Vertex, tangent))
         }};
     }
 };
@@ -422,14 +422,14 @@ layout(binding = 0) uniform CameraUBO {
 layout(location = 0) in vec3 inPosition;
 layout(location = 1) in vec3 inNormal;
 layout(location = 2) in vec2 inTexCoord;
-layout(location = 3) in vec3 inTangent;
+layout(location = 3) in vec4 inTangent;
 
 layout(location = 0) out vec3 fragPos;
 layout(location = 1) out vec3 fragNormal;
 layout(location = 2) out vec2 fragTexCoord;
 layout(location = 3) out vec3 fragViewPos;
 layout(location = 4) out vec3 fragInvViewPos;
-layout(location = 5) out vec3 fragTangent;
+layout(location = 5) out vec4 fragTangent;
 
 void main() {
     // Transform position to view space
@@ -441,7 +441,8 @@ void main() {
     fragNormal = normalize(normalMatrix * inNormal);
     
     // Transform tangent to view space (same as normal transformation)
-    fragTangent = normalize(normalMatrix * inTangent);
+    vec3 worldTangent = normalize(normalMatrix * inTangent.xyz);
+    fragTangent = vec4(worldTangent, inTangent.w);
     
     fragTexCoord = inTexCoord;
     fragViewPos = camera.viewPos;
@@ -479,7 +480,7 @@ layout(location = 1) in vec3 fragNormal;
 layout(location = 2) in vec2 fragTexCoord;
 layout(location = 3) in vec3 fragViewPos;
 layout(location = 4) in vec3 fragInvViewPos;
-layout(location = 5) in vec3 fragTangent;
+layout(location = 5) in vec4 fragTangent;
 
 layout(location = 0) out vec4 outColor;
 
@@ -571,23 +572,40 @@ vec3 fresnelSchlick(float cosTheta, vec3 F0) {
 }
 
 vec3 getNormalFromMap() {
-    if(false){
+    if(material.hasNormalTexture != 0){
         // Sample normal map
+        vec3 dp1 = dFdx(fragPos);
+        vec3 dp2 = dFdy(fragPos);
+
+        vec2 duv1 = dFdx(fragTexCoord);
+        vec2 duv2 = dFdy(fragTexCoord);
+        
+
         vec3 normalColor = texture(normalTexture, fragTexCoord).rgb;
-        vec3 tangentNormal = normalize(normalColor * 2.0 - 1.0);
+        vec3 tangentNormal = normalColor * 2.0 - 1.0;
         
         // Use proper tangent vectors from vertex shader
         vec3 N = normalize(fragNormal);
-        vec3 T = normalize(fragTangent);
+
+        vec3 dp2perp = cross(dp2, N);
+        vec3 dp1perp = cross(N, dp1);
+
+        vec3 T = dp2perp * duv1.x + dp1perp * duv2.x;
+        vec3 B = dp2perp * duv1.y + dp1perp * duv2.y;
+
+        float invmax = inversesqrt(max(dot(T,T), dot(B,B)));
+        mat3 TBN = mat3(T * invmax, B * invmax, N);
+        
+        //vec3 T = normalize(fragTangent.xyz);
         
         // Re-orthogonalize T with respect to N (Gram-Schmidt process)
-        T = normalize(T - dot(T, N) * N);
+        //T = normalize(T - dot(T, N) * N);
         
-        // Calculate bitangent
-        vec3 B = cross(N, T);
+        // Calculate bitangent using handedness
+        //vec3 B = cross(T, N) * fragTangent.w;
         
         // Create TBN matrix
-        mat3 TBN = mat3(T, B, N);
+        //mat3 TBN = mat3(T, B, N);
         
         return normalize(TBN * tangentNormal);
     }
@@ -699,7 +717,7 @@ void main() {
             // Make rim stronger on smooth surfaces
             rim *= (1.0 - roughness * 0.5);
 
-            vec3 rimColor = lights.lightColors[i] * rim * 0.002; // Use actual light color
+            vec3 rimColor = lights.lightColors[i] * rim * 0.02; // Use actual light color
             Lo += rimColor * radiance;
 
 
@@ -744,7 +762,7 @@ public:
     
     void loadSponzaIfAvailable() {
         std::cout << "Executable directory: " << FileUtils::getExecutableDirectory() << std::endl;
-        std::string sponzaPath = FileUtils::resolveRelativePath("assets/models/sponza/Sponza.gltf");
+        std::string sponzaPath = FileUtils::resolveRelativePath("assets/models/FlightHelmet/FlightHelmet.gltf");
         std::cout << "Looking for Sponza model at: " << sponzaPath << std::endl;
         
         if (FileUtils::fileExists(sponzaPath)) {
@@ -1530,9 +1548,11 @@ private:
     }
     
     vk::Format findSupportedTextureFormat() {
-        // Force use of the most basic, universally supported format for Mac debugging
         std::vector<vk::Format> candidates = {
-            vk::Format::eR8G8B8A8Unorm    // Most basic format - should work everywhere
+            vk::Format::eR8G8B8A8Srgb,    // Preferred sRGB format for proper color space
+            vk::Format::eR8G8B8A8Unorm,   // Linear format fallback
+            vk::Format::eB8G8R8A8Srgb,    // Alternative sRGB
+            vk::Format::eB8G8R8A8Unorm    // Alternative linear
         };
         
         for (vk::Format format : candidates) {
@@ -1755,19 +1775,12 @@ private:
     
     Texture loadTexture(const std::string& path) {
         int texWidth, texHeight, texChannels;
-        std::cout << "Attempting to load: " << path << std::endl;
-        std::cout << "File exists check: " << (FileUtils::fileExists(path) ? "YES" : "NO") << std::endl;
-        
         stbi_uc* pixels = stbi_load(path.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
         vk::DeviceSize imageSize = texWidth * texHeight * 4;
         
         if (!pixels) {
-            std::cerr << "ERROR: stbi_load failed for " << path << std::endl;
-            std::cerr << "stbi_failure_reason: " << stbi_failure_reason() << std::endl;
             throw std::runtime_error("Failed to load texture image: " + path);
         }
-        
-        std::cout << "stbi_load SUCCESS for " << path << std::endl;
         
         // Handle channel swizzling for BGR formats
         if (needsChannelSwizzle(textureFormat)) {
@@ -1777,14 +1790,7 @@ private:
         
         std::cout << "Loading texture " << path << " (" << texWidth << "x" << texHeight << ", " << texChannels << " channels)" << std::endl;
         
-        // Debug: Check first few pixels to see if data is correct
-        std::cout << "  First pixel RGBA: " << (int)pixels[0] << ", " << (int)pixels[1] << ", " << (int)pixels[2] << ", " << (int)pixels[3] << std::endl;
-        if (texWidth > 1 || texHeight > 1) {
-            int midPixel = (texHeight / 2 * texWidth + texWidth / 2) * 4;
-            std::cout << "  Middle pixel RGBA: " << (int)pixels[midPixel] << ", " << (int)pixels[midPixel+1] << ", " << (int)pixels[midPixel+2] << ", " << (int)pixels[midPixel+3] << std::endl;
-        }
-        
-        uint32_t mipLevels = 1; // Disable mipmaps for Mac debugging
+        uint32_t mipLevels = static_cast<uint32_t>(std::floor(std::log2(std::max(texWidth, texHeight)))) + 1;
         
         // Create staging buffer
         vk::Buffer stagingBuffer;
@@ -1806,9 +1812,6 @@ private:
         vmaMapMemory(allocator, stagingAllocation, &data);
         memcpy(data, pixels, static_cast<size_t>(imageSize));
         
-        // Debug: Verify data after copy
-        unsigned char* copiedData = static_cast<unsigned char*>(data);
-        std::cout << "  After staging copy - First pixel RGBA: " << (int)copiedData[0] << ", " << (int)copiedData[1] << ", " << (int)copiedData[2] << ", " << (int)copiedData[3] << std::endl;
         
         vmaUnmapMemory(allocator, stagingAllocation);
         
@@ -1826,17 +1829,10 @@ private:
         transitionImageLayout(texture.image, textureFormat, vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal, mipLevels);
         copyBufferToImage(stagingBuffer, texture.image, static_cast<uint32_t>(texWidth), static_cast<uint32_t>(texHeight));
         
-        // Ensure transfer is complete before continuing
-        device.waitIdle();
         
         vmaDestroyBuffer(allocator, stagingBuffer, stagingAllocation);
         
-        // Since mipmaps are disabled, directly transition to shader read only
-        if (mipLevels == 1) {
-            transitionImageLayout(texture.image, textureFormat, vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eShaderReadOnlyOptimal, 1);
-        } else {
-            generateMipmaps(texture.image, textureFormat, texWidth, texHeight, mipLevels);
-        }
+        generateMipmaps(texture.image, textureFormat, texWidth, texHeight, mipLevels);
         
         texture.imageView = createImageView(texture.image, textureFormat, vk::ImageAspectFlagBits::eColor, mipLevels);
         
@@ -1929,10 +1925,6 @@ private:
         uint8_t normalPixel[4] = {128, 128, 255, 255}; // Default normal (0, 0, 1) in tangent space
         uint8_t metallicRoughnessPixel[4] = {0, 128, 0, 255}; // No metallic, 0.5 roughness
         
-        std::cout << "Creating default textures with:" << std::endl;
-        std::cout << "  White pixel: " << (int)whitePixel[0] << ", " << (int)whitePixel[1] << ", " << (int)whitePixel[2] << ", " << (int)whitePixel[3] << std::endl;
-        std::cout << "  Normal pixel: " << (int)normalPixel[0] << ", " << (int)normalPixel[1] << ", " << (int)normalPixel[2] << ", " << (int)normalPixel[3] << std::endl;
-        std::cout << "  MetallicRoughness pixel: " << (int)metallicRoughnessPixel[0] << ", " << (int)metallicRoughnessPixel[1] << ", " << (int)metallicRoughnessPixel[2] << ", " << (int)metallicRoughnessPixel[3] << std::endl;
         
         // Handle channel swizzling for BGR formats
         if (needsChannelSwizzle(textureFormat)) {
@@ -2002,8 +1994,6 @@ private:
         
         const Material& material = loadedModel.materials[materialIndex];
         
-        //std::cout << "Updating material " << materialIndex << " descriptors:" << std::endl;
-        //std::cout << "  Albedo texture index: " << material.albedoTextureIndex << " (loaded textures: " << loadedTextures.size() << ")" << std::endl;
         
         // Determine which textures to use
         const Texture* albedoTex = (material.albedoTextureIndex >= 0 && material.albedoTextureIndex < loadedTextures.size()) 
@@ -2013,13 +2003,6 @@ private:
         const Texture* metallicRoughnessTex = (material.metallicRoughnessTextureIndex >= 0 && material.metallicRoughnessTextureIndex < loadedTextures.size()) 
             ? &loadedTextures[material.metallicRoughnessTextureIndex] : &defaultMetallicRoughnessTexture;
         
-        //std::cout << "  Using textures: albedo=" << (albedoTex == &defaultAlbedoTexture ? "default" : "loaded") 
-        //          << ", normal=" << (normalTex == &defaultNormalTexture ? "default" : "loaded") 
-        //          << ", metallic=" << (metallicRoughnessTex == &defaultMetallicRoughnessTexture ? "default" : "loaded") << std::endl;
-        
-        if (albedoTex != &defaultAlbedoTexture) {
-            //std::cout << "  Using loaded albedo texture index: " << material.albedoTextureIndex << std::endl;
-        }
         
         // Validate texture objects
         if (!albedoTex->imageView || !albedoTex->sampler) {
@@ -2099,22 +2082,22 @@ private:
         std::string absolutePath = FileUtils::resolveRelativePath(path);
         std::cout << "Loading model from absolute path: " << absolutePath << std::endl;
         
+        
         Assimp::Importer importer;
+        
+        importer.SetPropertyFloat(AI_CONFIG_PP_GSN_MAX_SMOOTHING_ANGLE, 90.0f);
+        importer.SetPropertyBool(AI_CONFIG_PP_FD_REMOVE, true);
+
         const aiScene* scene = importer.ReadFile(path, 
             aiProcess_Triangulate | 
-            aiProcess_FlipUVs | 
-            aiProcess_CalcTangentSpace |
-            aiProcess_GenNormals |
-            aiProcess_JoinIdenticalVertices |
+            aiProcess_ConvertToLeftHanded |
+            aiProcessPreset_TargetRealtime_MaxQuality |
             aiProcess_OptimizeMeshes);
 
         if (!scene) {
             scene = importer.ReadFile(absolutePath, 
             aiProcess_Triangulate | 
             aiProcess_FlipUVs | 
-            aiProcess_CalcTangentSpace |
-            aiProcess_GenNormals |
-            aiProcess_JoinIdenticalVertices |
             aiProcess_OptimizeMeshes);
         }
         
@@ -2129,7 +2112,7 @@ private:
         loadMaterials(scene, model);
         
         // Process nodes recursively with 10% scale
-        glm::mat4 scaleMatrix = glm::scale(glm::mat4(1.0f), glm::vec3(0.5f));
+        glm::mat4 scaleMatrix = glm::scale(glm::mat4(1.0f), glm::vec3(1.0f));
         processNode(scene->mRootNode, scene, model, scaleMatrix);
         
         // Create GPU buffers for all meshes
@@ -2289,18 +2272,19 @@ private:
                 vertex.texCoord = glm::vec2(0.0f, 0.0f);
             }
             
-            // Tangent - transform like normal and store handedness in w component
+            // Tangent - store in model space, let vertex shader handle transformation
             if (mesh->HasTangentsAndBitangents()) {
-                glm::mat3 normalMatrix = glm::transpose(glm::inverse(glm::mat3(transform)));
-                glm::vec3 worldTangent = normalMatrix * glm::vec3(mesh->mTangents[i].x, mesh->mTangents[i].y, mesh->mTangents[i].z);
-                glm::vec3 worldBitangent = normalMatrix * glm::vec3(mesh->mBitangents[i].x, mesh->mBitangents[i].y, mesh->mBitangents[i].z);
+                glm::vec3 tangent = glm::vec3(mesh->mTangents[i].x, mesh->mTangents[i].y, mesh->mTangents[i].z);
+                glm::vec3 bitangent = glm::vec3(mesh->mBitangents[i].x, mesh->mBitangents[i].y, mesh->mBitangents[i].z);
+                glm::vec3 normal = glm::vec3(mesh->mNormals[i].x, mesh->mNormals[i].y, mesh->mNormals[i].z);
                 
                 // Calculate handedness for proper bitangent reconstruction
-                glm::vec3 worldNormal = normalMatrix * glm::vec3(mesh->mNormals[i].x, mesh->mNormals[i].y, mesh->mNormals[i].z);
-                float handedness = glm::dot(glm::cross(worldNormal, worldTangent), worldBitangent) < 0.0f ? -1.0f : 1.0f;
+                float handedness = glm::dot(glm::cross(normal, tangent), bitangent) < 0.0f ? -1.0f : 1.0f;
                 
-                vertex.tangent = glm::normalize(worldTangent);
-                // We'll store handedness in a separate way since tangent is vec3
+                vertex.tangent = glm::vec4(glm::normalize(tangent), handedness);
+            } else {
+                // Default tangent if not available
+                vertex.tangent = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
             }
             
             result.vertices.push_back(vertex);
@@ -2609,7 +2593,7 @@ private:
                     tangent = -tangent;
                 }
 
-                vertex.tangent = tangent;
+                vertex.tangent = glm::vec4(tangent, 1.0f);
                 
                 vertices.push_back(vertex);
             }
@@ -2899,9 +2883,9 @@ private:
             lightUbo.lightPositions[i] = glm::vec4((glm::vec3)viewSpacePos, 0.0f);
         }
         
-        lightUbo.lightColors[0] = glm::vec4(3.0f, 0.0f, 0.0f,0.0f);   // CYAN
-        lightUbo.lightColors[1] = glm::vec4(0.0f, 3.0f, 0.0f,0.0f);   // MAGENTA
-        lightUbo.lightColors[2] = glm::vec4(0.0f, 0.0f, 3.0f,0.0f);   // YELLOW
+        lightUbo.lightColors[0] = glm::vec4(4.0f, 0.0f, 0.0f,0.0f);   // CYAN
+        lightUbo.lightColors[1] = glm::vec4(0.0f, 4.0f, 0.0f,0.0f);   // MAGENTA
+        lightUbo.lightColors[2] = glm::vec4(0.0f, 0.0f, 4.0f,0.0f);   // YELLOW
         lightUbo.lightColors[3] = glm::vec4(0.0f, 0.0f, 0.0f,0.0f); // WHITE
         
         vmaMapMemory(allocator, lightUniformBufferAllocations[currentImage], &data);
