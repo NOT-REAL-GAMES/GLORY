@@ -1,3 +1,6 @@
+#define GLM_FORCE_RADIANS
+#define GLM_FORCE_DEPTH_ZERO_TO_ONE  // Important for Vulkan depth range
+
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
 
@@ -241,6 +244,7 @@ struct CameraUBO {
     alignas(16) glm::mat4 view;
     alignas(16) glm::mat4 proj;
     alignas(16) glm::vec3 viewPos;
+    alignas(4) float padding;  // Alignment padding
     alignas(16) glm::mat4 invView;
 };
 
@@ -449,6 +453,7 @@ layout(binding = 0) uniform CameraUBO {
     mat4 view;
     mat4 proj;
     vec3 viewPos;
+    float padding;
     vec3 invViewPos;
 } camera;
 
@@ -799,6 +804,7 @@ layout(binding = 0) uniform CameraUBO {
     mat4 view;
     mat4 proj;
     vec3 viewPos;
+    float padding;
     vec3 invViewPos;
 } camera;
 
@@ -806,7 +812,7 @@ layout(location = 0) out vec3 worldDirection;
 
 void main() {
     vec2 pos = positions[gl_VertexIndex];
-    gl_Position = vec4(pos, 1.0, 1.0);
+    gl_Position = vec4(pos, 0.0, 1.0); // Inverse Z: 0.0 is far plane
     
     // Calculate world direction from screen position
     vec4 clipPos = vec4(pos, 1.0, 1.0);
@@ -2618,7 +2624,7 @@ private:
         auto opaqueDepthStencil = vk::PipelineDepthStencilStateCreateInfo();
         opaqueDepthStencil.depthTestEnable = VK_TRUE;
         opaqueDepthStencil.depthWriteEnable = VK_TRUE; // Enable depth writes for opaque objects
-        opaqueDepthStencil.depthCompareOp = vk::CompareOp::eLess;
+        opaqueDepthStencil.depthCompareOp = vk::CompareOp::eGreater; // Inverse Z-buffer
         opaqueDepthStencil.depthBoundsTestEnable = VK_FALSE;
         opaqueDepthStencil.stencilTestEnable = VK_FALSE;
         
@@ -2666,7 +2672,7 @@ private:
         auto transparentDepthStencil = vk::PipelineDepthStencilStateCreateInfo();
         transparentDepthStencil.depthTestEnable = VK_TRUE;
         transparentDepthStencil.depthWriteEnable = VK_FALSE; // Disable depth writes for transparency
-        transparentDepthStencil.depthCompareOp = vk::CompareOp::eLess;
+        transparentDepthStencil.depthCompareOp = vk::CompareOp::eGreater; // Inverse Z-buffer
         transparentDepthStencil.depthBoundsTestEnable = VK_FALSE;
         transparentDepthStencil.stencilTestEnable = VK_FALSE;
         
@@ -2816,9 +2822,9 @@ private:
         
         // Skybox depth state - render where no geometry exists
         auto skyboxDepthStencil = vk::PipelineDepthStencilStateCreateInfo();
-        skyboxDepthStencil.depthTestEnable = VK_FALSE; // Disable depth test for skybox
+        skyboxDepthStencil.depthTestEnable = VK_TRUE; // Enable depth test for skybox
         skyboxDepthStencil.depthWriteEnable = VK_FALSE; // Don't write depth for skybox
-        skyboxDepthStencil.depthCompareOp = vk::CompareOp::eAlways;
+        skyboxDepthStencil.depthCompareOp = vk::CompareOp::eGreaterOrEqual; // Inverse Z: skybox at far plane (0.0)
         skyboxDepthStencil.depthBoundsTestEnable = VK_FALSE;
         skyboxDepthStencil.stencilTestEnable = VK_FALSE;
         
@@ -3231,7 +3237,11 @@ private:
         CameraUBO cameraUbo{};
         cameraUbo.view = camera.getViewMatrix();
         cameraUbo.invView = glm::inverse(cameraUbo.view);
-        cameraUbo.proj = glm::perspective(glm::radians(camera.zoom), swapChainExtent.width / (float) swapChainExtent.height, 0.1f, 10000.0f);
+        
+        float nearPlane = 0.1f;
+        float farPlane = 1000000.0f;
+        // Inverse Z-buffer: swap near and far planes for better precision
+        cameraUbo.proj = glm::perspective(glm::radians(camera.zoom), swapChainExtent.width / (float) swapChainExtent.height, farPlane, nearPlane);
         cameraUbo.proj[1][1] *= -1; // Flip Y for Vulkan
         cameraUbo.viewPos = camera.position;
         
@@ -3299,7 +3309,7 @@ private:
         
         std::array<vk::ClearValue, 2> clearValues{};
         clearValues[0].color = vk::ClearColorValue{std::array<float, 4>{{0.0f, 0.0f, 0.0f, 1.0f}}};
-        clearValues[1].depthStencil = vk::ClearDepthStencilValue{1.0f, 0};
+        clearValues[1].depthStencil = vk::ClearDepthStencilValue{0.0f, 0}; // Inverse Z: clear to far plane
         
         auto renderPassInfo = vk::RenderPassBeginInfo();
         renderPassInfo.renderPass = renderPass;
