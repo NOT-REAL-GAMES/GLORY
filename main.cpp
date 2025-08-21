@@ -976,17 +976,17 @@ public:
             
             // Cleanup buffers
             if (vertexBuffer) {
-                vmaDestroyBuffer(allocator, vertexBuffer, vertexBufferAllocation);
+                vmaDestroyBuffer(allocator, (VkBuffer)vertexBuffer, vertexBufferAllocation);
             }
             if (indexBuffer) {
-                vmaDestroyBuffer(allocator, indexBuffer, indexBufferAllocation);
+                vmaDestroyBuffer(allocator, (VkBuffer)indexBuffer, indexBufferAllocation);
             }
             
             for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-                vmaDestroyBuffer(allocator, cameraUniformBuffers[i], cameraUniformBufferAllocations[i]);
-                vmaDestroyBuffer(allocator, lightUniformBuffers[i], lightUniformBufferAllocations[i]);
-                vmaDestroyBuffer(allocator, materialUniformBuffers[i], materialUniformBufferAllocations[i]);
-                vmaDestroyBuffer(allocator, skyboxUniformBuffers[i], skyboxUniformBufferAllocations[i]);
+                vmaDestroyBuffer(allocator, (VkBuffer)cameraUniformBuffers[i], cameraUniformBufferAllocations[i]);
+                vmaDestroyBuffer(allocator, (VkBuffer)lightUniformBuffers[i], lightUniformBufferAllocations[i]);
+                vmaDestroyBuffer(allocator, (VkBuffer)materialUniformBuffers[i], materialUniformBufferAllocations[i]);
+                vmaDestroyBuffer(allocator, (VkBuffer)skyboxUniformBuffers[i], skyboxUniformBufferAllocations[i]);
             }
             
             // Cleanup shared samplers first
@@ -997,7 +997,7 @@ public:
             auto cleanupTexture = [this](Texture& texture) {
                 // Note: Don't destroy sampler since it's shared
                 if (texture.imageView) device.destroyImageView(texture.imageView);
-                if (texture.image) vmaDestroyImage(allocator, texture.image, texture.allocation);
+                if (texture.image) vmaDestroyImage(allocator, (VkImage)texture.image, texture.allocation);
             };
             
             cleanupTexture(defaultAlbedoTexture);
@@ -1010,15 +1010,15 @@ public:
             
             // Cleanup depth buffer
             if (depthImageView) device.destroyImageView(depthImageView);
-            if (depthImage) vmaDestroyImage(allocator, depthImage, depthImageAllocation);
+            if (depthImage) vmaDestroyImage(allocator, (VkImage)depthImage, depthImageAllocation);
             
             // Cleanup model buffers
             for (auto& mesh : loadedModel.meshes) {
                 if (mesh.vertexBuffer) {
-                    vmaDestroyBuffer(allocator, mesh.vertexBuffer, mesh.vertexBufferAllocation);
+                    vmaDestroyBuffer(allocator, (VkBuffer)mesh.vertexBuffer, mesh.vertexBufferAllocation);
                 }
                 if (mesh.indexBuffer) {
-                    vmaDestroyBuffer(allocator, mesh.indexBuffer, mesh.indexBufferAllocation);
+                    vmaDestroyBuffer(allocator, (VkBuffer)mesh.indexBuffer, mesh.indexBufferAllocation);
                 }
             }
             
@@ -1145,7 +1145,7 @@ private:
             return false;
         }
 
-        surface = s;
+        surface = (vk::SurfaceKHR)s;
         
         // Pick physical device and create logical device
         if (!pickPhysicalDevice() || !createLogicalDevice()) {
@@ -1967,7 +1967,7 @@ private:
         copyBufferToImage(stagingBuffer, texture.image, static_cast<uint32_t>(texWidth), static_cast<uint32_t>(texHeight));
         
         
-        vmaDestroyBuffer(allocator, stagingBuffer, stagingAllocation);
+        vmaDestroyBuffer(allocator, (VkBuffer)stagingBuffer, stagingAllocation);
         
         generateMipmaps(texture.image, textureFormat, texWidth, texHeight, mipLevels);
         
@@ -2114,7 +2114,7 @@ private:
         copyBufferToImage(stagingBuffer, texture.image, 1, 1);
         transitionImageLayout(texture.image, textureFormat, vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eShaderReadOnlyOptimal, 1);
         
-        vmaDestroyBuffer(allocator, stagingBuffer, stagingAllocation);
+        vmaDestroyBuffer(allocator, (VkBuffer)stagingBuffer, stagingAllocation);
         
         texture.imageView = createImageView(texture.image, textureFormat, vk::ImageAspectFlagBits::eColor, 1);
         
